@@ -31,6 +31,24 @@ uv run fuel-tracker
 Get a bot token from [@BotFather](https://t.me/BotFather) and paste it into `.env` as
 `TELEGRAM_BOT_TOKEN=...`.
 
+> **Set in BotFather (manual, optional):** profile picture and the bot's display name —
+> these can't be set via the API. The command menu, description and "about" text are
+> registered automatically on startup.
+
+## Using the bot
+
+You rarely need to type commands. After `/start` you get a **persistent button keyboard**:
+
+```
+[ ➕ Add fuel ] [ 📊 Stats ]
+[ 📈 Chart    ] [ 🚗 Cars  ]
+[ ❓ Help                  ]
+```
+
+Tap **➕ Add fuel** and send `14.01 @ 92184`; after logging you get one-tap
+**[📈 Chart] [📊 Stats] [↩️ Undo]** buttons. The `/` command menu and the Menu button list
+everything too.
+
 ## Commands
 
 | Command | What it does |
@@ -63,3 +81,11 @@ km/L     = distance / liters_added_now
 ```
 
 Overall = (last odometer − first odometer) / (sum of all liters except the first baseline fill).
+
+## Roadmap: Mini App dashboard (future)
+
+A [Telegram Mini App](https://core.telegram.org/bots/webapps) would give an app-like, interactive
+in-chat dashboard (reusing [fuel_tracker.html](fuel_tracker.html) + Chart.js). It's not built yet
+because it needs a public **HTTPS** host for the web page (e.g. GitHub Pages / Vercel) plus a data
+bridge — the bot serving a small read-only JSON endpoint keyed by the Web App's `initData`, or a
+signed token in the launch URL. The current build is fully native Telegram and needs no hosting.

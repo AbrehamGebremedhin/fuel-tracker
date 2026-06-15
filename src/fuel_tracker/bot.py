@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
+from html import escape as _escape
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    ForceReply,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    MenuButtonCommands,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -17,34 +25,40 @@ from telegram.ext import (
     filters,
 )
 
-from . import db
+from . import db, keyboards
 from .calc import Stats, compute_stats
 from .chart import render_chart
 from .config import require_token
+from .keyboards import (
+    BTN_ADD,
+    BTN_CARS,
+    BTN_CHART,
+    BTN_HELP,
+    BTN_STATS,
+    MAIN_KEYBOARD,
+    add_car_hint_keyboard,
+    after_fillup_keyboard,
+)
 from .parsing import parse_addcar, parse_fillups
 from .sources import autodata, fueleconomy, goonet
 from .sources.base import Economy
 
 logger = logging.getLogger(__name__)
+HTML = ParseMode.HTML
 
-HELP = (
-    "*Fuel Tracker*\n\n"
-    "1. Add a car: `/addcar Toyota Corolla 2018`\n"
-    "   I'll show the engine variants — pick yours and I'll fetch its rated economy.\n"
-    "2. Log fill-ups by just sending: `14.01 @ 92184`\n"
-    "   (also accepts `14.01 liter @ 92184 km`). Paste many lines at once to import.\n"
-    "3. See `/stats` and `/history` anytime.\n\n"
-    "*Commands*\n"
-    "/addcar <make> <model> <year> - add a car\n"
-    "/cars - list your cars\n"
-    "/use <id> - switch the active car\n"
-    "/delcar <id> - delete a car and its history\n"
-    "/setrated <km/L> - set the rated economy manually\n"
-    "/stats - averages & totals for the active car\n"
-    "/history - recent fill-ups\n"
-    "/chart - km/L trend chart\n"
-    "/undo - remove the last fill-up\n"
+HELP_BODY = (
+    "Track your car's <b>real-world</b> fuel economy (km/L).\n\n"
+    "1. Add a car: <code>/addcar Toyota Corolla 2018</code>\n"
+    "   Pick your engine variant and I'll fetch its rated economy.\n"
+    "2. Log a fill-up by sending <code>14.01 @ 92184</code>\n"
+    "   (also <code>14.01 liter @ 92184 km</code>). Paste many lines to import.\n"
+    "3. Tap the buttons below or use the menu for stats &amp; charts."
 )
+
+
+def esc(value: object) -> str:
+    """Escape a dynamic value for HTML parse mode."""
+    return _escape(str(value), quote=False)
 
 
 def _fmt_rated(car: db.Car) -> str:
@@ -54,108 +68,37 @@ def _fmt_rated(car: db.Car) -> str:
     return "not set"
 
 
-def _short_gen(gen_label: str, make: str, model: str) -> str:
-    """Trim a generation title to a clean tag for selection buttons.
-
-    "Toyota Corolla XII (E210, facelift 2022)" -> "XII (E210, facelift 2022)";
-    "Toyota Corolla Axio" -> "Axio". Avoids the mid-parenthesis truncation.
-    """
-    s = re.sub(r"\s+", " ", gen_label).strip()
-    prefix = f"{make} {model} "
-    if s.lower().startswith(prefix.lower()):
-        s = s[len(prefix):]
-    # Keep up to the first complete "(...)" group so we never cut mid-paren.
-    m = re.match(r"^[^(]*\([^)]*\)", s)
-    tag = (m.group(0) if m else s).strip()
-    return tag[:28]
+_BLOCKS = "▁▂▃▄▅▆▇█"
 
 
-async def start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
+def _sparkline(values: list[float]) -> str:
+    if not values:
+        return ""
+    lo, hi = min(values), max(values)
+    if hi == lo:
+        return _BLOCKS[3] * len(values)
+    span = hi - lo
+    return "".join(_BLOCKS[int((v - lo) / span * (len(_BLOCKS) - 1))] for v in values)
 
 
-async def addcar(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    arg = " ".join(ctx.args)
-    parsed = parse_addcar(arg)
-    if not parsed:
-        await update.message.reply_text(
-            "Usage: `/addcar <make> <model> <year>`\nExample: `/addcar Toyota Corolla 2018`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
+# --- shared "no active car" nudge -------------------------------------------
 
-    existing = db.find_car(user_id, parsed.make, parsed.model, parsed.year)
-    if existing:
-        db.set_active(user_id, existing.id)
-        await update.message.reply_text(
-            f"You already have *{existing.label}* (#{existing.id}). Made it active.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    msg = await update.message.reply_text(
-        f"🔎 Searching variants for *{parsed.make} {parsed.model} {parsed.year}*…",
-        parse_mode=ParseMode.MARKDOWN,
+async def _need_car(message: Message) -> None:
+    await message.reply_text(
+        "You don't have an active car yet. Add one to get started 👇",
+        reply_markup=add_car_hint_keyboard(),
     )
 
-    result = await autodata.search_variants(parsed.make, parsed.model, parsed.year)
-    if not result or not result.variants:
-        # No variant list — query the JDM catalog and the US EPA concurrently.
-        jdm, epa = await asyncio.gather(
-            goonet.lookup(parsed.make, parsed.model, parsed.year),
-            fueleconomy.lookup(parsed.make, parsed.model, parsed.year),
-        )
-        chosen = jdm or epa
-        car_id = _create_car(user_id, parsed.make, parsed.model, parsed.year, chosen)
-        if chosen:
-            others = [e for e in (jdm, epa) if e and e is not chosen]
-            await msg.edit_text(
-                f"*{parsed.make} {parsed.model} {parsed.year}* added (car #{car_id}) and set active.\n\n"
-                + _rated_block(chosen, others)
-                + "\nNow send fill-ups like `14.01 @ 92184`.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        else:
-            await msg.edit_text(
-                f"*{parsed.make} {parsed.model} {parsed.year}* added (car #{car_id}) and set active.\n\n"
-                "⚠️ Couldn't find variants or rated economy from any source. "
-                "Set it manually with `/setrated <km/L>`.\n\n"
-                "You can still log fill-ups: `14.01 @ 92184`.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        return
 
-    # Stash candidates for the callback (keyed by index in callback_data).
-    ctx.user_data["addcar"] = {
-        "make": parsed.make,
-        "model": parsed.model,
-        "year": parsed.year,
-        "variants": [(v.name, v.url, v.gen_label) for v in result.variants],
-    }
-    multi_gen = len({v.gen_label for v in result.variants if v.gen_label}) > 1
-    rows: list[list[InlineKeyboardButton]] = []
-    for i, v in enumerate(result.variants):
-        label = v.name
-        if multi_gen and v.gen_label:
-            label = f"{v.name}  ·  {_short_gen(v.gen_label, parsed.make, parsed.model)}"
-        rows.append([InlineKeyboardButton(label[:62], callback_data=f"var:{i}")])
-    rows.append([InlineKeyboardButton("None of these / enter manually", callback_data="var:manual")])
-
-    await msg.edit_text(
-        f"Found *{result.model_name}*. Which one is yours?",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-
+# --- rated-economy resolution & formatting ----------------------------------
 
 def _rated_block(chosen: Economy, others: list[Economy]) -> str:
     body = (
-        f"📋 Rated: *{chosen.km_per_l} km/L* ({chosen.l_per_100} L/100 km)\n"
-        f"_Source: {chosen.source} — {chosen.detail}_\n"
+        f"📋 Rated: <b>{chosen.km_per_l} km/L</b> ({chosen.l_per_100} L/100 km)\n"
+        f"<i>Source: {esc(chosen.source)} — {esc(chosen.detail)}</i>\n"
     )
     for e in others:
-        body += f"_Cross-check ({e.source}): {e.km_per_l} km/L_\n"
+        body += f"<i>Cross-check ({esc(e.source)}): {e.km_per_l} km/L</i>\n"
     return body
 
 
@@ -172,38 +115,130 @@ def _create_car(user_id: int, make: str, model: str, year: int,
     return car_id
 
 
+# --- /start, /help ----------------------------------------------------------
+
+async def start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        "<b>⛽ Fuel Tracker</b>\n\n" + HELP_BODY,
+        parse_mode=HTML,
+        reply_markup=MAIN_KEYBOARD,
+    )
+    if not db.list_cars(user_id):
+        await update.message.reply_text(
+            "Start by adding your car:", reply_markup=add_car_hint_keyboard()
+        )
+
+
+# --- add car ----------------------------------------------------------------
+
+async def addcar(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _do_addcar(update.message, ctx, update.effective_user.id, " ".join(ctx.args))
+
+
+async def _do_addcar(message: Message, ctx: ContextTypes.DEFAULT_TYPE,
+                     user_id: int, arg: str) -> None:
+    parsed = parse_addcar(arg)
+    if not parsed:
+        await message.reply_text(
+            "Usage: <code>/addcar &lt;make&gt; &lt;model&gt; &lt;year&gt;</code>\n"
+            "Example: <code>/addcar Toyota Corolla 2018</code>",
+            parse_mode=HTML,
+        )
+        return
+
+    existing = db.find_car(user_id, parsed.make, parsed.model, parsed.year)
+    if existing:
+        db.set_active(user_id, existing.id)
+        await message.reply_text(
+            f"You already have <b>{esc(existing.label)}</b> (#{existing.id}). Made it active.",
+            parse_mode=HTML,
+        )
+        return
+
+    msg = await message.reply_text(
+        f"🔎 Searching variants for <b>{esc(parsed.make)} {esc(parsed.model)} {parsed.year}</b>…",
+        parse_mode=HTML,
+    )
+
+    result = await autodata.search_variants(parsed.make, parsed.model, parsed.year)
+    if not result or not result.variants:
+        # No variant list — query the JDM catalog and the US EPA concurrently.
+        jdm, epa = await asyncio.gather(
+            goonet.lookup(parsed.make, parsed.model, parsed.year),
+            fueleconomy.lookup(parsed.make, parsed.model, parsed.year),
+        )
+        chosen = jdm or epa
+        car_id = _create_car(user_id, parsed.make, parsed.model, parsed.year, chosen)
+        header = (f"<b>{esc(parsed.make)} {esc(parsed.model)} {parsed.year}</b> "
+                  f"added (car #{car_id}) and set active.\n\n")
+        if chosen:
+            others = [e for e in (jdm, epa) if e and e is not chosen]
+            await msg.edit_text(
+                header + _rated_block(chosen, others) + "\nNow send a fill-up like "
+                "<code>14.01 @ 92184</code>.",
+                parse_mode=HTML,
+            )
+        else:
+            await msg.edit_text(
+                header + "⚠️ Couldn't find variants or rated economy from any source. "
+                "Set it manually with <code>/setrated &lt;km/L&gt;</code>.\n\n"
+                "You can still log fill-ups: <code>14.01 @ 92184</code>.",
+                parse_mode=HTML,
+            )
+        return
+
+    ctx.user_data["addcar"] = {
+        "make": parsed.make,
+        "model": parsed.model,
+        "year": parsed.year,
+        "variants": [(v.name, v.url, v.gen_label) for v in result.variants],
+    }
+    await msg.edit_text(
+        f"Found <b>{esc(result.model_name)}</b>. Which one is yours?",
+        parse_mode=HTML,
+        reply_markup=keyboards.build_variant_keyboard(
+            result.variants, parsed.make, parsed.model
+        ),
+    )
+
+
 async def on_variant_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    choice = query.data.split(":", 1)[1]
+
+    if choice == "cancel":
+        ctx.user_data.pop("addcar", None)
+        await query.edit_message_text("Cancelled — no car added.")
+        return
+
     pending = ctx.user_data.get("addcar")
     if not pending:
         await query.edit_message_text("That selection expired. Send /addcar again.")
         return
-
     make, model, year = pending["make"], pending["model"], pending["year"]
-    choice = query.data.split(":", 1)[1]
 
     if choice == "manual":
         car_id = _create_car(user_id, make, model, year, None)
         ctx.user_data.pop("addcar", None)
         await query.edit_message_text(
-            f"*{make} {model} {year}* added (car #{car_id}) and set active.\n\n"
-            "Set the rated economy with `/setrated <km/L>`, or just start logging "
-            "fill-ups like `14.01 @ 92184`.",
-            parse_mode=ParseMode.MARKDOWN,
+            f"<b>{esc(make)} {esc(model)} {year}</b> added (car #{car_id}) and set active.\n\n"
+            "Set the rated economy with <code>/setrated &lt;km/L&gt;</code>, or just start "
+            "logging fill-ups like <code>14.01 @ 92184</code>.",
+            parse_mode=HTML,
         )
         return
 
     name, url, _gen = pending["variants"][int(choice)]
     full_model = f"{model} {name}"
     await query.edit_message_text(
-        f"⛽ Fetching fuel economy for *{make} {full_model} {year}*…",
-        parse_mode=ParseMode.MARKDOWN,
+        f"⛽ Fetching fuel economy for <b>{esc(make)} {esc(full_model)} {year}</b>…",
+        parse_mode=HTML,
     )
 
-    # Query all three sources concurrently and cross-check them.
-    # Priority for the headline figure: exact variant (auto-data) > JDM > US EPA.
+    # All three sources concurrently. Headline priority: exact variant > JDM > US EPA.
     primary, jdm, epa = await asyncio.gather(
         autodata.variant_economy(url, detail=name),
         goonet.lookup(make, model, year, variant=name),
@@ -213,54 +248,62 @@ async def on_variant_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     car_id = _create_car(user_id, make, full_model, year, chosen, source_url=url)
     ctx.user_data.pop("addcar", None)
 
-    header = f"*{make} {full_model} {year}* added (car #{car_id}) and set active.\n\n"
+    header = (f"<b>{esc(make)} {esc(full_model)} {year}</b> added "
+              f"(car #{car_id}) and set active.\n\n")
     if chosen:
         others = [e for e in (primary, jdm, epa) if e and e is not chosen]
-        body = _rated_block(chosen, others) + "\nNow send fill-ups like `14.01 @ 92184`."
+        body = _rated_block(chosen, others) + "\nNow send a fill-up like <code>14.01 @ 92184</code>."
     else:
         body = (
-            "⚠️ Neither source had a rated figure for this variant. "
-            "Set it with `/setrated <km/L>`.\n\nYou can still log fill-ups: `14.01 @ 92184`."
+            "⚠️ No source had a rated figure for this variant. "
+            "Set it with <code>/setrated &lt;km/L&gt;</code>.\n\n"
+            "You can still log fill-ups: <code>14.01 @ 92184</code>."
         )
-    await query.edit_message_text(header + body, parse_mode=ParseMode.MARKDOWN,
-                                  disable_web_page_preview=True)
+    await query.edit_message_text(header + body, parse_mode=HTML, disable_web_page_preview=True)
 
 
-async def cars(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
+# --- cars / use / delete ----------------------------------------------------
+
+async def _reply_cars(message: Message, user_id: int) -> None:
     all_cars = db.list_cars(user_id)
     if not all_cars:
-        await update.message.reply_text("No cars yet. Add one with `/addcar Toyota Corolla 2018`.",
-                                        parse_mode=ParseMode.MARKDOWN)
+        await _need_car(message)
         return
     active = db.get_active_car(user_id)
     active_id = active.id if active else None
-    lines = ["*Your cars*"]
+    lines = ["<b>Your cars</b>"]
     for c in all_cars:
-        marker = "✅" if c.id == active_id else f"`/use {c.id}`"
-        lines.append(f"{marker} *{c.label}* — rated {_fmt_rated(c)}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        marker = "✅" if c.id == active_id else f"<code>/use {c.id}</code>"
+        lines.append(f"{marker} <b>{esc(c.label)}</b> — rated {esc(_fmt_rated(c))}")
+    await message.reply_text("\n".join(lines), parse_mode=HTML)
+
+
+async def cars(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply_cars(update.message, update.effective_user.id)
 
 
 async def use_car(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not ctx.args or not ctx.args[0].isdigit():
-        await update.message.reply_text("Usage: `/use <car id>` (see `/cars`).",
-                                        parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "Usage: <code>/use &lt;car id&gt;</code> (see /cars).", parse_mode=HTML
+        )
         return
     car = db.get_car(int(ctx.args[0]), user_id=user_id)
     if not car:
         await update.message.reply_text("No car with that id.")
         return
     db.set_active(user_id, car.id)
-    await update.message.reply_text(f"Active car is now *{car.label}*.", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"Active car is now <b>{esc(car.label)}</b>.", parse_mode=HTML
+    )
 
 
 async def delcar(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not ctx.args or not ctx.args[0].isdigit():
         await update.message.reply_text(
-            "Usage: `/delcar <car id>` (see `/cars`).", parse_mode=ParseMode.MARKDOWN
+            "Usage: <code>/delcar &lt;car id&gt;</code> (see /cars).", parse_mode=HTML
         )
         return
     car = db.get_car(int(ctx.args[0]), user_id=user_id)
@@ -273,8 +316,8 @@ async def delcar(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("Cancel", callback_data="del:cancel"),
     ]])
     await update.message.reply_text(
-        f"⚠️ Delete *{car.label}* and its *{n}* fill-up(s)? This can't be undone.",
-        parse_mode=ParseMode.MARKDOWN,
+        f"⚠️ Delete <b>{esc(car.label)}</b> and its <b>{n}</b> fill-up(s)? This can't be undone.",
+        parse_mode=HTML,
         reply_markup=keyboard,
     )
 
@@ -291,160 +334,224 @@ async def on_delete(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not car:
         await query.edit_message_text("That car no longer exists.")
         return
-    remaining = db.list_cars(user_id)
-    tail = ""
-    if remaining:
-        tail = "\n\nPick a car to make active with `/use <id>` (see `/cars`)."
+    tail = "\n\nPick a car with <code>/use &lt;id&gt;</code> (see /cars)." if db.list_cars(user_id) else ""
     await query.edit_message_text(
-        f"🗑 Deleted *{car.label}* and its history.{tail}",
-        parse_mode=ParseMode.MARKDOWN,
+        f"🗑 Deleted <b>{esc(car.label)}</b> and its history.{tail}", parse_mode=HTML
     )
 
+
+# --- setrated ---------------------------------------------------------------
 
 async def setrated(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     car = db.get_active_car(user_id)
     if not car:
-        await update.message.reply_text("No active car. Add one with `/addcar` first.",
-                                        parse_mode=ParseMode.MARKDOWN)
+        await _need_car(update.message)
         return
     try:
         kmpl = float(ctx.args[0].replace(",", "."))
         if kmpl <= 0:
             raise ValueError
     except (IndexError, ValueError):
-        await update.message.reply_text("Usage: `/setrated <km/L>`, e.g. `/setrated 18.5`.",
-                                        parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "Usage: <code>/setrated &lt;km/L&gt;</code>, e.g. <code>/setrated 18.5</code>.",
+            parse_mode=HTML,
+        )
         return
     l100 = round(100 / kmpl, 2)
     db.set_rated(car.id, l100=l100, kmpl=round(kmpl, 2), note="set manually")
     await update.message.reply_text(
-        f"Rated economy for *{car.label}* set to *{round(kmpl, 2)} km/L* ({l100} L/100 km).",
-        parse_mode=ParseMode.MARKDOWN,
+        f"Rated economy for <b>{esc(car.label)}</b> set to "
+        f"<b>{round(kmpl, 2)} km/L</b> ({l100} L/100 km).",
+        parse_mode=HTML,
     )
 
 
+# --- stats / history / chart / undo -----------------------------------------
+
 def _stats_text(car: db.Car, stats: Stats | None) -> str:
-    head = f"*{car.label}*\nRated: {_fmt_rated(car)}\n"
+    head = f"<b>{esc(car.label)}</b>\nRated: {esc(_fmt_rated(car))}\n"
     if not stats:
         return head + "\nNot enough fill-ups yet — add at least two to see km/L."
     latest = stats.latest_leg
     cmp_line = ""
     if car.rated_kmpl and latest:
         delta = latest.km_per_l - car.rated_kmpl
-        sign = "above" if delta >= 0 else "below"
-        cmp_line = f"  ({abs(round(delta, 2))} km/L {sign} rated)"
+        word = "above" if delta >= 0 else "below"
+        cmp_line = f"  ({abs(round(delta, 2))} km/L {word} rated)"
     return (
         head
-        + f"\n*Overall:* {stats.overall_km_per_l} km/L  ({stats.overall_l_per_100} L/100)\n"
+        + f"\n<b>Overall:</b> {stats.overall_km_per_l} km/L  ({stats.overall_l_per_100} L/100)\n"
         + f"Distance: {stats.total_distance:,} km over {stats.fillup_count} fill-ups\n"
         + f"Fuel used: {stats.total_fuel} L\n"
         + f"Best: {stats.best_km_per_l} km/L   Worst: {stats.worst_km_per_l} km/L\n"
-        + (f"\n*Latest tank:* {latest.km_per_l} km/L ({latest.l_per_100} L/100){cmp_line}"
-           if latest else "")
+        + (f"\n<b>Latest tank:</b> {latest.km_per_l} km/L "
+           f"({latest.l_per_100} L/100){cmp_line}" if latest else "")
+    )
+
+
+async def _reply_stats(message: Message, user_id: int) -> None:
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(message)
+        return
+    s = compute_stats(db.get_fillups(car.id))
+    await message.reply_text(_stats_text(car, s), parse_mode=HTML)
+
+
+async def _reply_history(message: Message, user_id: int) -> None:
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(message)
+        return
+    s = compute_stats(db.get_fillups(car.id))
+    if not s:
+        await message.reply_text(
+            f"<b>{esc(car.label)}</b>: not enough fill-ups yet.", parse_mode=HTML
+        )
+        return
+    spark = _sparkline([leg.km_per_l for leg in s.legs])
+    lines = [
+        f"<b>{esc(car.label)}</b> — last {min(12, len(s.legs))} legs",
+        f"<code>{spark}</code>  {s.worst_km_per_l}–{s.best_km_per_l} km/L\n",
+    ]
+    for leg in s.legs[-12:]:
+        lines.append(
+            f"<code>{leg.odo_to:>7,} km  +{leg.liters:>5.2f}L</code>  →  "
+            f"<b>{leg.km_per_l:.2f}</b> km/L"
+        )
+    await message.reply_text("\n".join(lines), parse_mode=HTML)
+
+
+async def _reply_chart(message: Message, user_id: int) -> None:
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(message)
+        return
+    s = compute_stats(db.get_fillups(car.id))
+    if not s:
+        await message.reply_text(
+            f"<b>{esc(car.label)}</b>: need at least two fill-ups to draw a chart.",
+            parse_mode=HTML,
+        )
+        return
+    png = await asyncio.to_thread(render_chart, car, s)  # CPU-bound; keep loop free
+    rated = f" · rated {car.rated_kmpl} km/L" if car.rated_kmpl else ""
+    caption = (
+        f"<b>{esc(car.label)}</b> — overall {s.overall_km_per_l} km/L, "
+        f"latest {s.latest_leg.km_per_l} km/L{rated}"
+    )
+    await message.reply_photo(photo=png, caption=caption, parse_mode=HTML)
+
+
+async def _reply_undo(message: Message, user_id: int) -> None:
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(message)
+        return
+    removed = db.delete_last_fillup(car.id)
+    if not removed:
+        await message.reply_text("No fill-ups to remove.")
+        return
+    odo, liters = removed
+    await message.reply_text(
+        f"↩️ Removed last fill-up: {liters} L @ {odo:,} km from <b>{esc(car.label)}</b>.",
+        parse_mode=HTML,
     )
 
 
 async def stats(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    car = db.get_active_car(user_id)
-    if not car:
-        await update.message.reply_text("No active car. Add one with `/addcar` first.",
-                                        parse_mode=ParseMode.MARKDOWN)
-        return
-    s = compute_stats(db.get_fillups(car.id))
-    await update.message.reply_text(_stats_text(car, s), parse_mode=ParseMode.MARKDOWN)
+    await _reply_stats(update.message, update.effective_user.id)
 
 
 async def history(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    car = db.get_active_car(user_id)
-    if not car:
-        await update.message.reply_text("No active car. Add one with `/addcar` first.",
-                                        parse_mode=ParseMode.MARKDOWN)
-        return
-    s = compute_stats(db.get_fillups(car.id))
-    if not s:
-        await update.message.reply_text(
-            f"*{car.label}*: not enough fill-ups yet.", parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    lines = [f"*{car.label}* — last {min(12, len(s.legs))} legs:"]
-    for leg in s.legs[-12:]:
-        lines.append(
-            f"`{leg.odo_to:>7,}` km  +{leg.liters:>5.2f} L  →  "
-            f"*{leg.km_per_l:>5.2f}* km/L  ({leg.l_per_100} L/100)"
-        )
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await _reply_history(update.message, update.effective_user.id)
 
 
 async def chart(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    car = db.get_active_car(user_id)
-    if not car:
-        await update.message.reply_text("No active car. Add one with `/addcar` first.",
-                                        parse_mode=ParseMode.MARKDOWN)
-        return
-    s = compute_stats(db.get_fillups(car.id))
-    if not s:
-        await update.message.reply_text(
-            f"*{car.label}*: need at least two fill-ups to draw a chart.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    # Rendering is CPU-bound; keep the event loop free.
-    png = await asyncio.to_thread(render_chart, car, s)
-    rated = f" · rated {car.rated_kmpl} km/L" if car.rated_kmpl else ""
-    caption = (
-        f"*{car.label}* — overall {s.overall_km_per_l} km/L, "
-        f"latest {s.latest_leg.km_per_l} km/L{rated}"
-    )
-    await update.message.reply_photo(photo=png, caption=caption, parse_mode=ParseMode.MARKDOWN)
+    await _reply_chart(update.message, update.effective_user.id)
 
 
 async def undo(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    car = db.get_active_car(user_id)
-    if not car:
-        await update.message.reply_text("No active car.")
-        return
-    removed = db.delete_last_fillup(car.id)
-    if not removed:
-        await update.message.reply_text("No fill-ups to remove.")
-        return
-    odo, liters = removed
-    await update.message.reply_text(
-        f"Removed last fill-up: {liters} L @ {odo:,} km from *{car.label}*.",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    await _reply_undo(update.message, update.effective_user.id)
 
 
-async def on_text(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Plain text: try to parse one or more 'liters @ km' fill-up lines."""
+# --- inline quick actions ---------------------------------------------------
+
+async def on_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
     user_id = update.effective_user.id
-    text = update.message.text or ""
+    action = query.data.split(":", 1)[1]
+    if action == "chart":
+        await query.answer()
+        await _reply_chart(query.message, user_id)
+    elif action == "stats":
+        await query.answer()
+        await _reply_stats(query.message, user_id)
+    elif action == "undo":
+        await query.answer("Removed ✓")
+        await _reply_undo(query.message, user_id)
+    elif action == "addcar_hint":
+        await query.answer()
+        ctx.user_data["await_addcar"] = True
+        await query.message.reply_text(
+            "Reply with your car as <b>make model year</b>, e.g. "
+            "<code>Toyota Corolla 2018</code>.",
+            parse_mode=HTML,
+            reply_markup=ForceReply(input_field_placeholder="Toyota Corolla 2018"),
+        )
+
+
+async def on_noop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer()  # generation header row — not selectable
+
+
+# --- free text (buttons + fill-ups) -----------------------------------------
+
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    text = (update.message.text or "").strip()
+
+    # Persistent reply-keyboard taps.
+    if text == BTN_STATS:
+        return await _reply_stats(update.message, user_id)
+    if text == BTN_CHART:
+        return await _reply_chart(update.message, user_id)
+    if text == BTN_CARS:
+        return await _reply_cars(update.message, user_id)
+    if text == BTN_HELP:
+        return await start(update, ctx)
+    if text == BTN_ADD:
+        await update.message.reply_text(
+            "Send your fill-up as <code>liters @ km</code>, e.g. <code>14.01 @ 92184</code>.",
+            parse_mode=HTML,
+            reply_markup=ForceReply(input_field_placeholder="14.01 @ 92184"),
+        )
+        return
+
+    # Reply to the "Add a car" force-reply prompt.
+    if ctx.user_data.pop("await_addcar", False):
+        return await _do_addcar(update.message, ctx, user_id, text)
+
+    # Otherwise: one or more "liters @ km" fill-up lines.
     parsed, bad = parse_fillups(text)
-
     if not parsed:
         await update.message.reply_text(
-            "I didn't understand that. Send a fill-up like `14.01 @ 92184`, or /help.",
-            parse_mode=ParseMode.MARKDOWN,
+            "I didn't understand that. Send a fill-up like <code>14.01 @ 92184</code>, or /help.",
+            parse_mode=HTML,
         )
         return
 
     car = db.get_active_car(user_id)
     if not car:
-        await update.message.reply_text(
-            "Add a car first with `/addcar Toyota Corolla 2018`, then log fill-ups.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await _need_car(update.message)
         return
 
     for p in parsed:
         db.add_fillup(car.id, p.odometer, p.liters)
 
     s = compute_stats(db.get_fillups(car.id))
-    count_note = f"Logged {len(parsed)} fill-up(s) for *{car.label}*."
+    count_note = f"✅ Logged {len(parsed)} fill-up(s) for <b>{esc(car.label)}</b>."
     if len(parsed) == 1 and s and s.latest_leg:
         leg = s.latest_leg
         rated_cmp = ""
@@ -453,25 +560,60 @@ async def on_text(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
             rated_cmp = f" — {'+' if delta >= 0 else ''}{round(delta, 2)} vs rated {car.rated_kmpl}"
         body = (
             f"{count_note}\n\n"
-            f"This tank: *{leg.km_per_l} km/L* ({leg.l_per_100} L/100) over {leg.distance:,} km{rated_cmp}\n"
+            f"This tank: <b>{leg.km_per_l} km/L</b> ({leg.l_per_100} L/100) "
+            f"over {leg.distance:,} km{rated_cmp}\n"
             f"Overall: {s.overall_km_per_l} km/L"
         )
     elif s:
-        body = f"{count_note}\nOverall now: *{s.overall_km_per_l} km/L* over {s.total_distance:,} km."
+        body = (f"{count_note}\nOverall now: <b>{s.overall_km_per_l} km/L</b> "
+                f"over {s.total_distance:,} km.")
     else:
         body = f"{count_note}\nAdd one more fill-up to start seeing km/L."
     if bad:
         body += f"\n\n⚠️ Skipped {len(bad)} line(s) I couldn't parse."
-    await update.message.reply_text(body, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(body, parse_mode=HTML, reply_markup=after_fillup_keyboard())
+
+
+# --- application setup ------------------------------------------------------
+
+_COMMANDS = [
+    BotCommand("addcar", "Add a car (make model year)"),
+    BotCommand("cars", "List your cars"),
+    BotCommand("use", "Switch active car"),
+    BotCommand("stats", "Economy stats"),
+    BotCommand("chart", "km/L trend chart"),
+    BotCommand("history", "Recent fill-ups"),
+    BotCommand("setrated", "Set rated km/L manually"),
+    BotCommand("delcar", "Delete a car"),
+    BotCommand("undo", "Remove last fill-up"),
+    BotCommand("help", "How to use the bot"),
+]
+
+
+async def _post_init(app: Application) -> None:
+    """Register the command menu, descriptions and menu button (runs once at startup)."""
+    await app.bot.set_my_commands(_COMMANDS)
+    await app.bot.set_my_short_description(
+        "Track your car's real km/L — add a car, log liters @ km, see stats & charts."
+    )
+    await app.bot.set_my_description(
+        "Fuel Tracker logs your fill-ups and computes real-world fuel economy (km/L).\n\n"
+        "Add your car, pick its engine variant, and I'll fetch the rated economy from "
+        "auto-data.net, the JDM catalog and the US EPA. Then send 'liters @ km' after each "
+        "fill-up for instant stats and charts."
+    )
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
 def build_application() -> Application:
     token = require_token()
     db.init_db()
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_post_init).build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("addcar", addcar))
     app.add_handler(CallbackQueryHandler(on_variant_selected, pattern=r"^var:"))
+    app.add_handler(CallbackQueryHandler(on_action, pattern=r"^act:"))
+    app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CommandHandler("cars", cars))
     app.add_handler(CommandHandler("use", use_car))
     app.add_handler(CommandHandler("delcar", delcar))
@@ -490,7 +632,6 @@ def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
     )
     # httpx logs every request URL at INFO — and the URL embeds the bot token.
-    # Keep it quiet so the token never lands in log files.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     app = build_application()
     logger.info("Fuel Tracker bot starting (polling)…")

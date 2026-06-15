@@ -215,14 +215,38 @@ def test_undo():
 
 
 def test_short_gen_tag():
-    from fuel_tracker.bot import _short_gen
-    assert _short_gen("Toyota Corolla XII (E210, facelift 2022)", "Toyota", "Corolla") == "XII (E210, facelift 2022)"
-    assert _short_gen("Toyota Corolla Axio", "Toyota", "Corolla") == "Axio"
-    assert _short_gen("Toyota Corolla iM", "Toyota", "Corolla") == "iM"
-    assert _short_gen("Toyota Corolla XI (E160, E170)", "Toyota", "Corolla") == "XI (E160, E170)"
+    from fuel_tracker.keyboards import short_gen
+    assert short_gen("Toyota Corolla XII (E210, facelift 2022)", "Toyota", "Corolla") == "XII (E210, facelift 2022)"
+    assert short_gen("Toyota Corolla Axio", "Toyota", "Corolla") == "Axio"
+    assert short_gen("Toyota Corolla iM", "Toyota", "Corolla") == "iM"
+    assert short_gen("Toyota Corolla XI (E160, E170)", "Toyota", "Corolla") == "XI (E160, E170)"
     # Never ends with a dangling open paren (the old bug).
-    assert not _short_gen("Toyota Corolla XII (E210)", "Toyota", "Corolla").endswith("(")
+    assert not short_gen("Toyota Corolla XII (E210)", "Toyota", "Corolla").endswith("(")
     print("ok: short generation tag")
+
+
+def test_group_variants():
+    from fuel_tracker.keyboards import group_variants
+    from fuel_tracker.sources.base import Variant
+    variants = [
+        Variant("1.8i (122 Hp) Hybrid e-CVT", "u1", "Toyota Corolla XII (E210)"),
+        Variant("1.8 VVT-i (140 Hp)", "u2", "Toyota Corolla XII (E210)"),
+        Variant("1.5 (109 Hp)", "u3", "Toyota Corolla Axio"),
+    ]
+    groups = group_variants(variants, "Toyota", "Corolla")
+    # Two generations -> two groups, each with a header.
+    assert [g["header"] for g in groups] == ["XII (E210)", "Axio"]
+    # Within the E210 group the hybrid is sorted last; indices map back to originals.
+    e210 = groups[0]["items"]
+    assert e210[-1] == (0, "1.8i (122 Hp) Hybrid e-CVT")
+    assert (1, "1.8 VVT-i (140 Hp)") in e210
+
+    # Single generation -> no headers.
+    single = group_variants(
+        [Variant("A", "u", "Gen X"), Variant("B", "u", "Gen X")], "Mk", "Md"
+    )
+    assert single[0]["header"] is None
+    print("ok: group variants (gen headers + hybrid-last)")
 
 
 def test_delete_car():
@@ -256,5 +280,6 @@ if __name__ == "__main__":
     test_jdm_grade_matching()
     test_undo()
     test_short_gen_tag()
+    test_group_variants()
     test_delete_car()
     print("\nAll logic tests passed.")
