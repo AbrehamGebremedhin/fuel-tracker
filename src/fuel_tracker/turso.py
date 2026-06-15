@@ -19,9 +19,12 @@ _client = httpx.Client(timeout=30.0)
 
 
 def http_url(database_url: str) -> str:
-    url = database_url.strip()
+    """Normalise a Turso URL to an https endpoint, tolerating a bare host or quotes."""
+    url = database_url.strip().strip("'\"").strip()
     if url.startswith("libsql://"):
         url = "https://" + url[len("libsql://"):]
+    elif not url.startswith(("http://", "https://")):
+        url = "https://" + url
     return url.rstrip("/")
 
 

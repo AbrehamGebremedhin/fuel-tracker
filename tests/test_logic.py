@@ -310,6 +310,9 @@ def test_turso_codec():
     assert row == {"id": 1, "liters": 14.01, "cost": None}
     assert cur.lastrowid == 1
     assert turso.http_url("libsql://db-org.turso.io") == "https://db-org.turso.io"
+    assert turso.http_url("db-org.turso.io") == "https://db-org.turso.io"        # bare host
+    assert turso.http_url('"libsql://db-org.turso.io"') == "https://db-org.turso.io"  # quoted
+    assert turso.http_url("https://db-org.turso.io/") == "https://db-org.turso.io"
     print("ok: turso codec")
 
 
