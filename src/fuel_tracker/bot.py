@@ -26,7 +26,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import db, keyboards
+from . import config, db, keyboards
 from .calc import Stats, compute_stats
 from .chart import render_chart
 from .config import require_token
@@ -616,6 +616,11 @@ async def _post_init(app: Application) -> None:
 
 def build_application() -> Application:
     token = require_token()
+    if config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
+        from .turso import http_url
+        logger.info("Storage: Turso at %s", http_url(config.TURSO_DATABASE_URL))
+    else:
+        logger.info("Storage: local SQLite at %s", config.DB_PATH)
     db.init_db()
     app = Application.builder().token(token).post_init(_post_init).build()
     app.add_handler(CommandHandler(["start", "help"], start))

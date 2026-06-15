@@ -10,6 +10,7 @@ Enabled when TURSO_DATABASE_URL (libsql://… or https://…) and TURSO_AUTH_TOK
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any, Sequence
 
 import httpx
@@ -19,8 +20,12 @@ _client = httpx.Client(timeout=30.0)
 
 
 def http_url(database_url: str) -> str:
-    """Normalise a Turso URL to an https endpoint, tolerating a bare host or quotes."""
-    url = database_url.strip().strip("'\"").strip()
+    """Normalise a Turso URL to an https endpoint.
+
+    Tolerant of a bare host, surrounding quotes, and stray whitespace/newlines from a
+    mangled copy-paste (a URL never legitimately contains whitespace).
+    """
+    url = re.sub(r"\s+", "", database_url).strip("'\"")
     if url.startswith("libsql://"):
         url = "https://" + url[len("libsql://"):]
     elif not url.startswith(("http://", "https://")):

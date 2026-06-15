@@ -313,6 +313,9 @@ def test_turso_codec():
     assert turso.http_url("db-org.turso.io") == "https://db-org.turso.io"        # bare host
     assert turso.http_url('"libsql://db-org.turso.io"') == "https://db-org.turso.io"  # quoted
     assert turso.http_url("https://db-org.turso.io/") == "https://db-org.turso.io"
+    # Stray newline/whitespace from a mangled paste must not break DNS.
+    assert turso.http_url("libsql://db-org\n.turso.io\r\n") == "https://db-org.turso.io"
+    assert turso.http_url("  fuel-tracker-x.aws-us-west-2.turso.io  ") == "https://fuel-tracker-x.aws-us-west-2.turso.io"
     print("ok: turso codec")
 
 
