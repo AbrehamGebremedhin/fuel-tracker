@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS fillups (
     car_id     INTEGER NOT NULL REFERENCES cars(id) ON DELETE CASCADE,
     odometer   INTEGER NOT NULL,
     liters     REAL    NOT NULL,
+    cost       REAL,
     created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -67,6 +68,10 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
 def init_db(path: Path | None = None) -> None:
     with _connect(path) as conn:
         conn.executescript(_SCHEMA)
+        # Migrate older databases that predate the cost column.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(fillups)")}
+        if "cost" not in cols:
+            conn.execute("ALTER TABLE fillups ADD COLUMN cost REAL")
 
 
 def _row_to_car(row: sqlite3.Row) -> Car:
@@ -189,22 +194,22 @@ def get_active_car(user_id: int) -> Car | None:
 
 # --- fillups ----------------------------------------------------------------
 
-def add_fillup(car_id: int, odometer: int, liters: float) -> int:
+def add_fillup(car_id: int, odometer: int, liters: float, cost: float | None = None) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO fillups (car_id, odometer, liters) VALUES (?, ?, ?)",
-            (car_id, odometer, liters),
+            "INSERT INTO fillups (car_id, odometer, liters, cost) VALUES (?, ?, ?, ?)",
+            (car_id, odometer, liters, cost),
         )
         return int(cur.lastrowid)
 
 
-def get_fillups(car_id: int) -> list[tuple[int, float]]:
+def get_fillups(car_id: int) -> list[tuple[int, float, float | None]]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT odometer, liters FROM fillups WHERE car_id = ? ORDER BY odometer",
+            "SELECT odometer, liters, cost FROM fillups WHERE car_id = ? ORDER BY odometer",
             (car_id,),
         ).fetchall()
-        return [(r["odometer"], r["liters"]) for r in rows]
+        return [(r["odometer"], r["liters"], r["cost"]) for r in rows]
 
 
 def delete_last_fillup(car_id: int) -> tuple[int, float] | None:

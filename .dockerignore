@@ -1,0 +1,21 @@
+# Never copy the host virtualenv (wrong platform) or local state into the image.
+.venv/
+.uv/
+__pycache__/
+*.pyc
+*.db
+.env
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+dist/
+build/
+*.egg-info/
+sample_chart.png
+*.jpg
+*.png
+fuel_tracker.html
+tests/
+# NOTE: README.md is intentionally NOT ignored — hatchling needs it to build the wheel.

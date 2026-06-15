@@ -1,0 +1,19 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# A Telegram polling bot is a background worker (no inbound HTTP), with a
+# persistent disk so the SQLite database survives redeploys and restarts.
+services:
+  - type: worker
+    name: fuel-tracker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter            # background workers + disks require a paid plan
+    region: oregon
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false          # set this secret in the Render dashboard, not in git
+      - key: FUEL_TRACKER_DB
+        value: /data/fuel_tracker.db
+    disk:
+      name: fueldata
+      mountPath: /data
+      sizeGB: 1

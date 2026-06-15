@@ -64,6 +64,42 @@ def test_parsing_variants():
     print("ok: parsing variants")
 
 
+def test_cost_parsing():
+    assert parse_fillup_line("14.01 @ 92184").cost is None
+    assert parse_fillup_line("14.01 @ 92184 = 1200").cost == 1200
+    assert parse_fillup_line("14.01 @ 92184 km = 1,200").cost == 1200
+    # Price per litre -> total = price * liters.
+    assert almost(parse_fillup_line("14.01 @ 92184 @ 85/L").cost, 14.01 * 85)
+    assert almost(parse_fillup_line("20 @ 100000 @ 50 per L").cost, 1000.0)
+    # Decimal comma in the amount.
+    assert parse_fillup_line("10 @ 5000 = 85,5").cost == 85.5
+    # Odometer is still parsed correctly alongside a cost.
+    p = parse_fillup_line("14.01 @ 92184 = 1200")
+    assert p.liters == 14.01 and p.odometer == 92184
+    print("ok: cost parsing")
+
+
+def test_cost_calc():
+    # First fill-up is the baseline (no leg); the next two carry cost.
+    fillups = [(1000, 10.0, None), (1200, 20.0, 1000.0), (1500, 15.0, 750.0)]
+    s = compute_stats(fillups)
+    assert s.has_cost
+    assert s.total_cost == 1750
+    assert almost(s.avg_cost_per_100, 350.0)   # 1750 / 500 km * 100
+    assert almost(s.avg_price_per_l, 50.0)      # 1750 / 35 L
+    assert almost(s.legs[0].cost_per_100, 500.0)
+    assert almost(s.legs[0].price_per_l, 50.0)
+
+    # No costs at all -> cost aggregates are absent.
+    s2 = compute_stats([(0, 10.0, None), (200, 12.0, None)])
+    assert not s2.has_cost and s2.total_cost is None
+
+    # Partial costs: only legs that have a cost are aggregated.
+    s3 = compute_stats([(0, 10.0, None), (200, 20.0, 1000.0), (500, 15.0, None)])
+    assert s3.has_cost and s3.total_cost == 1000
+    print("ok: cost calc")
+
+
 def test_addcar_parse():
     c = parse_addcar("Toyota Corolla 2018")
     assert (c.make, c.model, c.year) == ("Toyota", "Corolla", 2018)
@@ -271,6 +307,8 @@ def test_delete_car():
 
 if __name__ == "__main__":
     test_parsing_variants()
+    test_cost_parsing()
+    test_cost_calc()
     test_addcar_parse()
     test_full_flow_matches_notes()
     test_user_isolation()

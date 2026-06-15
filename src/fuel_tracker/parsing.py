@@ -5,25 +5,33 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# Matches "14.01 @ 92184", "14.01 liter @ 92184 km", "14.01L@92184",
-# "14.01 litres @ 92,184 km", etc. The unit words and "km" are optional.
+# Matches "14.01 @ 92184", "14.01 liter @ 92184 km", "14.01L@92184", and an optional
+# trailing cost: "= 1200" (total paid) or "@ 85.7/L" (price per litre). The unit words,
+# "km", and the cost are all optional.
 _FILLUP_RE = re.compile(
     r"""
+    ^\s*
     (?P<liters>\d+(?:[.,]\d+)?)        # liters, dot or comma decimal
     \s*(?:l|liter|liters|litre|litres)?\s*
     @
-    \s*(?P<odo>[\d,\.]+?)\s*           # odometer, may have thousands separators
+    \s*(?P<odo>\d[\d,\.]*)\s*          # odometer, may have thousands separators
     (?:km|kms|kilometers?)?            # optional unit
+    \s*
+    (?P<rest>.*?)                      # optional trailing cost segment
     \s*$
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+
+_PER_LITRE_RE = re.compile(r"/\s*l|per\s*l", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
 
 @dataclass
 class ParsedFillup:
     liters: float
     odometer: int
+    cost: float | None = None  # total cost for this fill-up, in the user's own currency
 
 
 def _to_float(s: str) -> float:
@@ -35,8 +43,32 @@ def _to_int_odo(s: str) -> int:
     return int(re.sub(r"[,\.\s]", "", s))
 
 
+def _to_amount(s: str) -> float:
+    # Treat a single trailing "<comma><1-2 digits>" as a decimal comma; else commas
+    # are thousands separators.
+    if re.fullmatch(r"\d+,\d{1,2}", s):
+        s = s.replace(",", ".")
+    return float(s.replace(",", ""))
+
+
+def _parse_cost(rest: str, liters: float) -> float | None:
+    """Parse the trailing cost segment. Returns total cost or None."""
+    rest = rest.strip()
+    if not rest:
+        return None
+    m = _AMOUNT_RE.search(rest)
+    if not m:
+        return None
+    amount = _to_amount(m.group(0))
+    if amount <= 0:
+        return None
+    if _PER_LITRE_RE.search(rest):     # price per litre -> total = price * liters
+        return round(amount * liters, 2)
+    return round(amount, 2)             # otherwise it's the total paid
+
+
 def parse_fillup_line(line: str) -> ParsedFillup | None:
-    """Parse a single 'liters @ km' line. Returns None if it doesn't match."""
+    """Parse a single 'liters @ km [= cost | @ price/L]' line, or None."""
     m = _FILLUP_RE.match(line.strip())
     if not m:
         return None
@@ -47,7 +79,8 @@ def parse_fillup_line(line: str) -> ParsedFillup | None:
         return None
     if liters <= 0 or odo <= 0:
         return None
-    return ParsedFillup(liters=liters, odometer=odo)
+    cost = _parse_cost(m.group("rest"), liters)
+    return ParsedFillup(liters=liters, odometer=odo, cost=cost)
 
 
 def parse_fillups(text: str) -> tuple[list[ParsedFillup], list[str]]:

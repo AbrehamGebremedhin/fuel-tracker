@@ -52,6 +52,7 @@ HELP_BODY = (
     "   Pick your engine variant and I'll fetch its rated economy.\n"
     "2. Log a fill-up by sending <code>14.01 @ 92184</code>\n"
     "   (also <code>14.01 liter @ 92184 km</code>). Paste many lines to import.\n"
+    "   Add cost: <code>14.01 @ 92184 = 1200</code> (total) or <code>@ 85/L</code> (per litre).\n"
     "3. Tap the buttons below or use the menu for stats &amp; charts."
 )
 
@@ -385,6 +386,9 @@ def _stats_text(car: db.Car, stats: Stats | None) -> str:
         + f"Distance: {stats.total_distance:,} km over {stats.fillup_count} fill-ups\n"
         + f"Fuel used: {stats.total_fuel} L\n"
         + f"Best: {stats.best_km_per_l} km/L   Worst: {stats.worst_km_per_l} km/L\n"
+        + (f"\n💰 <b>Cost:</b> {stats.total_cost:g} total · "
+           f"{stats.avg_cost_per_100:g}/100 km · {stats.avg_price_per_l:g}/L\n"
+           if stats.has_cost else "")
         + (f"\n<b>Latest tank:</b> {latest.km_per_l} km/L "
            f"({latest.l_per_100} L/100){cmp_line}" if latest else "")
     )
@@ -548,7 +552,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     for p in parsed:
-        db.add_fillup(car.id, p.odometer, p.liters)
+        db.add_fillup(car.id, p.odometer, p.liters, p.cost)
 
     s = compute_stats(db.get_fillups(car.id))
     count_note = f"✅ Logged {len(parsed)} fill-up(s) for <b>{esc(car.label)}</b>."
@@ -558,10 +562,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if car.rated_kmpl:
             delta = leg.km_per_l - car.rated_kmpl
             rated_cmp = f" — {'+' if delta >= 0 else ''}{round(delta, 2)} vs rated {car.rated_kmpl}"
+        cost_line = ""
+        if leg.cost is not None:
+            cost_line = (f"\n💰 Cost: {leg.cost:g} "
+                         f"({leg.cost_per_100:g}/100 km · {leg.price_per_l:g}/L)")
         body = (
             f"{count_note}\n\n"
             f"This tank: <b>{leg.km_per_l} km/L</b> ({leg.l_per_100} L/100) "
-            f"over {leg.distance:,} km{rated_cmp}\n"
+            f"over {leg.distance:,} km{rated_cmp}{cost_line}\n"
             f"Overall: {s.overall_km_per_l} km/L"
         )
     elif s:

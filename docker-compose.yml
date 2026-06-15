@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    image: fuel-tracker
+    container_name: fuel-tracker
+    env_file: .env          # provides TELEGRAM_BOT_TOKEN
+    environment:
+      FUEL_TRACKER_DB: /data/fuel_tracker.db
+    volumes:
+      - fueldata:/data      # persists the sqlite database across restarts
+    restart: unless-stopped
+
+volumes:
+  fueldata:

@@ -31,6 +31,45 @@ uv run fuel-tracker
 Get a bot token from [@BotFather](https://t.me/BotFather) and paste it into `.env` as
 `TELEGRAM_BOT_TOKEN=...`.
 
+### Run with Docker
+
+```bash
+cp .env.example .env      # put your bot token in it
+docker compose up -d      # build + run in the background
+docker compose logs -f    # follow logs
+```
+
+The SQLite database lives in the named volume `fueldata` (mounted at `/data`), so your cars and
+history survive restarts and rebuilds. The container exposes no ports (the bot uses long polling).
+To run without Compose:
+
+```bash
+docker build -t fuel-tracker .
+docker run -d --name fuel-tracker --env-file .env -v fueldata:/data --restart unless-stopped fuel-tracker
+```
+
+> **Only one instance per token.** Telegram allows a single polling consumer, so stop any local
+> `uv run fuel-tracker` before starting the container (otherwise you'll see a `Conflict` error).
+
+### Deploy to Render
+
+The repo ships a [`render.yaml`](render.yaml) Blueprint that runs the bot as a **Background Worker**
+(no HTTP port, since it long-polls) with a **1 GB persistent disk** mounted at `/data` for the
+SQLite database.
+
+1. Push this repo to GitHub.
+2. In Render: **New → Blueprint**, pick the repo. It reads `render.yaml`.
+3. Set the **`TELEGRAM_BOT_TOKEN`** environment variable (it's marked `sync: false`, so Render
+   prompts for it instead of storing it in git).
+4. **Apply** — Render builds the Dockerfile and starts the worker.
+
+Notes:
+- Background workers and persistent disks are **paid** features (worker from ~$7/mo + disk). A free
+  *web* service won't work well: it has no disk (data is wiped on redeploy) and spins down without
+  inbound HTTP traffic, which a polling bot never receives.
+- The disk is mounted root-owned, which is why the container runs as root.
+- Only run one instance per token — don't also run it locally while the Render worker is live.
+
 > **Set in BotFather (manual, optional):** profile picture and the bot's display name —
 > these can't be set via the API. The command menu, description and "about" text are
 > registered automatically on startup.
@@ -49,6 +88,10 @@ Tap **➕ Add fuel** and send `14.01 @ 92184`; after logging you get one-tap
 **[📈 Chart] [📊 Stats] [↩️ Undo]** buttons. The `/` command menu and the Menu button list
 everything too.
 
+Optionally record what you paid — `14.01 @ 92184 = 1200` (total) or `14.01 @ 92184 @ 85/L`
+(price per litre, in your own currency). Once any fill-up has a cost, `/stats` shows spend and
+cost/100 km, and `/chart` adds a cost panel.
+
 ## Commands
 
 | Command | What it does |
@@ -60,9 +103,10 @@ everything too.
 | `/delcar <id>` | Delete a car and its history (asks to confirm) |
 | `/setrated 18.5` | Manually set rated km/L for the active car |
 | `14.01 @ 92184` | Log a fill-up (also accepts `14.01 liter @ 92184 km`) |
-| `/stats` | Averages & totals for the active car |
+| `14.01 @ 92184 = 1200` | Log a fill-up **with cost** (total paid). Or `@ 85/L` for price per litre |
+| `/stats` | Averages & totals (incl. cost) for the active car |
 | `/history` | Recent fill-ups with per-leg km/L |
-| `/chart` | PNG chart: km/L per tank (avg + rated lines) and liters per fill |
+| `/chart` | Dashboard: km/L trend + rated band, liters, and a cost/100 km panel when costs are logged |
 | `/undo` | Delete the last fill-up |
 
 You can paste **multiple `liters @ km` lines at once** to bulk-import your existing notes.

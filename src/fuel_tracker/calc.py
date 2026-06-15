@@ -13,6 +13,9 @@ class Leg:
     liters: float
     l_per_100: float
     km_per_l: float
+    cost: float | None = None
+    cost_per_100: float | None = None   # cost per 100 km driven
+    price_per_l: float | None = None
 
 
 @dataclass
@@ -25,18 +28,27 @@ class Stats:
     best_km_per_l: float
     worst_km_per_l: float
     legs: list[Leg]
+    # Cost aggregates (None when no fill-up has a recorded cost).
+    total_cost: float | None = None
+    avg_cost_per_100: float | None = None
+    avg_price_per_l: float | None = None
 
     @property
     def latest_leg(self) -> Leg | None:
         return self.legs[-1] if self.legs else None
 
+    @property
+    def has_cost(self) -> bool:
+        return self.total_cost is not None
 
-def compute_leg(odo_from: int, odo_to: int, liters: float) -> Leg | None:
+
+def compute_leg(odo_from: int, odo_to: int, liters: float,
+                cost: float | None = None) -> Leg | None:
     """A leg's economy: liters added at the *current* stop covered the distance just driven."""
     distance = odo_to - odo_from
     if distance <= 0 or liters <= 0:
         return None
-    return Leg(
+    leg = Leg(
         odo_from=odo_from,
         odo_to=odo_to,
         distance=distance,
@@ -44,10 +56,15 @@ def compute_leg(odo_from: int, odo_to: int, liters: float) -> Leg | None:
         l_per_100=round(liters / distance * 100, 2),
         km_per_l=round(distance / liters, 2),
     )
+    if cost is not None and cost > 0:
+        leg.cost = round(cost, 2)
+        leg.cost_per_100 = round(cost / distance * 100, 2)
+        leg.price_per_l = round(cost / liters, 2)
+    return leg
 
 
-def compute_stats(fillups: list[tuple[int, float]]) -> Stats | None:
-    """`fillups` is a list of (odometer, liters); order doesn't matter, we sort by odometer.
+def compute_stats(fillups: list[tuple]) -> Stats | None:
+    """`fillups` is a list of (odometer, liters[, cost]); order doesn't matter.
 
     Returns None if there aren't enough points to measure a leg.
     """
@@ -56,8 +73,9 @@ def compute_stats(fillups: list[tuple[int, float]]) -> Stats | None:
         return None
 
     legs: list[Leg] = []
-    for (odo_a, _la), (odo_b, lb) in zip(pts, pts[1:]):
-        leg = compute_leg(odo_a, odo_b, lb)
+    for prev, cur in zip(pts, pts[1:]):
+        cost = cur[2] if len(cur) > 2 else None
+        leg = compute_leg(prev[0], cur[0], cur[1], cost)
         if leg:
             legs.append(leg)
 
@@ -68,6 +86,15 @@ def compute_stats(fillups: list[tuple[int, float]]) -> Stats | None:
     total_fuel = sum(leg.liters for leg in legs)
     kmpls = [leg.km_per_l for leg in legs]
 
+    cost_legs = [leg for leg in legs if leg.cost is not None]
+    total_cost = avg_cost_per_100 = avg_price_per_l = None
+    if cost_legs:
+        total_cost = round(sum(leg.cost for leg in cost_legs), 2)
+        cost_distance = sum(leg.distance for leg in cost_legs)
+        cost_liters = sum(leg.liters for leg in cost_legs)
+        avg_cost_per_100 = round(total_cost / cost_distance * 100, 2)
+        avg_price_per_l = round(total_cost / cost_liters, 2)
+
     return Stats(
         fillup_count=len(pts),
         total_distance=total_distance,
@@ -77,4 +104,7 @@ def compute_stats(fillups: list[tuple[int, float]]) -> Stats | None:
         best_km_per_l=max(kmpls),
         worst_km_per_l=min(kmpls),
         legs=legs,
+        total_cost=total_cost,
+        avg_cost_per_100=avg_cost_per_100,
+        avg_price_per_l=avg_price_per_l,
     )
