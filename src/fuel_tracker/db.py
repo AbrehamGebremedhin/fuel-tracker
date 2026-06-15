@@ -6,7 +6,9 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import config
 from .config import DB_PATH
+from .turso import TursoConnection
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cars (
@@ -58,7 +60,9 @@ class Car:
         return f"{self.make} {self.model} {self.year}"
 
 
-def _connect(path: Path | None = None) -> sqlite3.Connection:
+def _connect(path: Path | None = None):
+    if config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
+        return TursoConnection(config.TURSO_DATABASE_URL, config.TURSO_AUTH_TOKEN)
     conn = sqlite3.connect(path or DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

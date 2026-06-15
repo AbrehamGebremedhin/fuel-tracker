@@ -51,24 +51,39 @@ docker run -d --name fuel-tracker --env-file .env -v fueldata:/data --restart un
 > **Only one instance per token.** Telegram allows a single polling consumer, so stop any local
 > `uv run fuel-tracker` before starting the container (otherwise you'll see a `Conflict` error).
 
-### Deploy to Render
+### Deploy to Render (free)
 
-The repo ships a [`render.yaml`](render.yaml) Blueprint that runs the bot as a **Background Worker**
-(no HTTP port, since it long-polls) with a **1 GB persistent disk** mounted at `/data` for the
-SQLite database.
+The bot adapts to its host: with no `PORT`/`RENDER_EXTERNAL_URL` it long-polls (local/dev); on a
+Render **Web Service** it serves Telegram via **webhook**, binding the port Render requires. Because
+the free tier has no persistent disk, storage uses **[Turso](https://turso.tech)** (libSQL over
+HTTP) so your data survives restarts/sleeps. The repo ships a [`render.yaml`](render.yaml) Blueprint
+for this.
 
-1. Push this repo to GitHub.
-2. In Render: **New → Blueprint**, pick the repo. It reads `render.yaml`.
-3. Set the **`TELEGRAM_BOT_TOKEN`** environment variable (it's marked `sync: false`, so Render
-   prompts for it instead of storing it in git).
-4. **Apply** — Render builds the Dockerfile and starts the worker.
+**1. Create a free Turso database** and grab its URL + token:
+
+```bash
+turso db create fuel-tracker
+turso db show fuel-tracker --url        # -> libsql://fuel-tracker-<org>.turso.io
+turso db tokens create fuel-tracker     # -> the auth token
+```
+
+**2. Deploy:** push this repo to GitHub → Render **New → Blueprint** → pick the repo. When prompted,
+set these (all `sync: false`, so they're entered as secrets, never committed):
+
+- `TELEGRAM_BOT_TOKEN`
+- `TURSO_DATABASE_URL` — the `libsql://…` URL
+- `TURSO_AUTH_TOKEN` — the token
+
+Render builds the Dockerfile, the webhook binds the port, and the bot registers its webhook on
+startup. The schema is created automatically on first run.
 
 Notes:
-- Background workers and persistent disks are **paid** features (worker from ~$7/mo + disk). A free
-  *web* service won't work well: it has no disk (data is wiped on redeploy) and spins down without
-  inbound HTTP traffic, which a polling bot never receives.
-- The disk is mounted root-owned, which is why the container runs as root.
-- Only run one instance per token — don't also run it locally while the Render worker is live.
+- Free web services **sleep after ~15 min idle**; the first message after a sleep wakes it (~50 s
+  cold start) and may need a resend. Add an external uptime ping if you want it always warm.
+- Leave `TURSO_*` unset to fall back to the local SQLite file (what local/dev and Docker use).
+- **Paid alternative:** a **Background Worker** + persistent disk needs no webhook and keeps plain
+  SQLite, but costs ~$7/mo. Switch `render.yaml`'s `type: web` → `type: worker` and add a `disk:`.
+- Only run one instance per token — don't also run it locally while Render is live.
 
 > **Set in BotFather (manual, optional):** profile picture and the bot's display name —
 > these can't be set via the API. The command menu, description and "about" text are

@@ -1,19 +1,20 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
-# A Telegram polling bot is a background worker (no inbound HTTP), with a
-# persistent disk so the SQLite database survives redeploys and restarts.
+#
+# Runs the bot as a free Web Service. On Render the process gets a PORT and a public
+# RENDER_EXTERNAL_URL, so the bot serves Telegram via *webhook* (binding the port that
+# Render's health check requires). Storage is Turso (libSQL over HTTP) so data survives
+# the free tier's restarts/sleeps — the free tier has no persistent disk.
 services:
-  - type: worker
+  - type: web
     name: fuel-tracker
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter            # background workers + disks require a paid plan
+    plan: free
     region: oregon
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false          # set this secret in the Render dashboard, not in git
-      - key: FUEL_TRACKER_DB
-        value: /data/fuel_tracker.db
-    disk:
-      name: fueldata
-      mountPath: /data
-      sizeGB: 1
+        sync: false          # set as secrets in the Render dashboard
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

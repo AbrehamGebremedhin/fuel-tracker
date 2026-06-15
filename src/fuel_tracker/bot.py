@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from html import escape as _escape
 
 from telegram import (
@@ -642,5 +643,22 @@ def run() -> None:
     # httpx logs every request URL at INFO — and the URL embeds the bot token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     app = build_application()
-    logger.info("Fuel Tracker bot starting (polling)…")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # On a host that provides a port + public URL (e.g. a Render web service), serve
+    # via webhook so the process binds a port. Otherwise fall back to long polling.
+    port = os.getenv("PORT")
+    external = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL")
+    if port and external:
+        token = require_token()
+        logger.info("Fuel Tracker bot starting (webhook on :%s)…", port)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=int(port),
+            url_path=token,
+            webhook_url=f"{external.rstrip('/')}/{token}",
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        logger.info("Fuel Tracker bot starting (polling)…")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)

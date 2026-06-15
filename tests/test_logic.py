@@ -285,6 +285,34 @@ def test_group_variants():
     print("ok: group variants (gen headers + hybrid-last)")
 
 
+def test_turso_codec():
+    from fuel_tracker import turso
+    # Argument encoding (integers go over the wire as strings in Hrana).
+    assert turso._enc_arg(None) == {"type": "null"}
+    assert turso._enc_arg(42) == {"type": "integer", "value": "42"}
+    assert turso._enc_arg(1.5) == {"type": "float", "value": 1.5}
+    assert turso._enc_arg("hi") == {"type": "text", "value": "hi"}
+    # Cell decoding.
+    assert turso._dec_cell({"type": "integer", "value": "7"}) == 7
+    assert turso._dec_cell({"type": "float", "value": "1.5"}) == 1.5
+    assert turso._dec_cell({"type": "null"}) is None
+    assert turso._dec_cell({"type": "text", "value": "x"}) == "x"
+    # Parsing a Hrana execute result into dict rows + lastrowid.
+    entry = {"response": {"result": {
+        "cols": [{"name": "id"}, {"name": "liters"}, {"name": "cost"}],
+        "rows": [[{"type": "integer", "value": "1"},
+                  {"type": "float", "value": "14.01"},
+                  {"type": "null"}]],
+        "last_insert_rowid": "1",
+    }}}
+    cur = turso.TursoConnection._to_cursor(entry)
+    row = cur.fetchone()
+    assert row == {"id": 1, "liters": 14.01, "cost": None}
+    assert cur.lastrowid == 1
+    assert turso.http_url("libsql://db-org.turso.io") == "https://db-org.turso.io"
+    print("ok: turso codec")
+
+
 def test_delete_car():
     db.init_db()
     car_id = db.add_car(303, "Mazda", "Demio", 2014)
@@ -319,5 +347,6 @@ if __name__ == "__main__":
     test_undo()
     test_short_gen_tag()
     test_group_variants()
+    test_turso_codec()
     test_delete_car()
     print("\nAll logic tests passed.")

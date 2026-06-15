@@ -16,6 +16,11 @@ DB_PATH: Path = Path(
     os.getenv("FUEL_TRACKER_DB", Path(__file__).resolve().parents[2] / "fuel_tracker.db")
 )
 
+# Optional Turso (libSQL) cloud database for durable storage on hosts without a disk.
+# When both are set, the bot uses Turso over HTTP instead of the local SQLite file.
+TURSO_DATABASE_URL: str = os.getenv("TURSO_DATABASE_URL", "").strip()
+TURSO_AUTH_TOKEN: str = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+
 
 def require_token() -> str:
     if not BOT_TOKEN:
