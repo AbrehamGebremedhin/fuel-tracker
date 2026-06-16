@@ -35,6 +35,19 @@ def http_url(database_url: str) -> str:
     return url.rstrip("/")
 
 
+def clean_token(auth_token: str) -> str:
+    """Strip wrapping junk from a Turso auth token.
+
+    A Turso token is a JWT — only ``[A-Za-z0-9._-]`` — so any whitespace, quotes or
+    backslashes are stray characters from a mangled copy-paste or shell-escaped env var.
+    Also tolerates an accidental ``Bearer `` prefix baked into the value.
+    """
+    token = re.sub(r"\s+", "", auth_token).strip("'\"\\`")
+    if token.lower().startswith("bearer"):
+        token = token[len("bearer"):].strip("'\"\\`")
+    return token
+
+
 def _enc_arg(value: Any) -> dict:
     if value is None:
         return {"type": "null"}
@@ -88,7 +101,7 @@ class TursoConnection:
 
     def __init__(self, database_url: str, auth_token: str):
         self._endpoint = f"{http_url(database_url)}/v2/pipeline"
-        self._headers = {"Authorization": f"Bearer {auth_token}"}
+        self._headers = {"Authorization": f"Bearer {clean_token(auth_token)}"}
 
     # context-manager parity with `with sqlite3.connect(...) as conn:`
     def __enter__(self) -> "TursoConnection":
@@ -107,7 +120,11 @@ class TursoConnection:
         reqs.append({"type": "close"})
 
         resp = _client.post(self._endpoint, headers=self._headers, json={"requests": reqs})
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # Surface Turso's message (e.g. a bad/expired auth token) instead of a bare code.
+            raise TursoError(
+                f"Turso {resp.status_code} from {self._endpoint}: {resp.text.strip()}"
+            )
         results = resp.json().get("results", [])
         for r in results:
             if r.get("type") == "error":
