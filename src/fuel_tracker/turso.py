@@ -22,10 +22,12 @@ _client = httpx.Client(timeout=30.0)
 def http_url(database_url: str) -> str:
     """Normalise a Turso URL to an https endpoint.
 
-    Tolerant of a bare host, surrounding quotes, and stray whitespace/newlines from a
-    mangled copy-paste (a URL never legitimately contains whitespace).
+    Tolerant of a bare host, surrounding quotes/backslashes, and stray whitespace or
+    newlines from a mangled copy-paste or shell-escaped env var (a URL never legitimately
+    contains whitespace, quotes or backslashes). Strips wrapping junk from both ends —
+    e.g. a value like `"https://db.turso.io"\\` becomes `https://db.turso.io`.
     """
-    url = re.sub(r"\s+", "", database_url).strip("'\"")
+    url = re.sub(r"\s+", "", database_url).strip("'\"\\`")
     if url.startswith("libsql://"):
         url = "https://" + url[len("libsql://"):]
     elif not url.startswith(("http://", "https://")):
