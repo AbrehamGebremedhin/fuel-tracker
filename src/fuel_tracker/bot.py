@@ -661,7 +661,11 @@ def run() -> None:
             port=int(port),
             url_path=token,
             webhook_url=f"{external.rstrip('/')}/{token}",
-            drop_pending_updates=True,
+            # Free tier sleeps after inactivity. The command that wakes the service
+            # sits in Telegram's pending queue during the ~30-60s cold start; dropping
+            # it here would lose exactly that first command. Keep it so it's delivered
+            # once the webhook server is up.
+            drop_pending_updates=False,
             allowed_updates=Update.ALL_TYPES,
         )
     else:
