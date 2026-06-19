@@ -14,7 +14,7 @@ _tmp = Path(tempfile.mkdtemp()) / "test.db"
 os.environ["FUEL_TRACKER_DB"] = str(_tmp)
 
 from fuel_tracker import db                      # noqa: E402
-from fuel_tracker.calc import compute_stats       # noqa: E402
+from fuel_tracker.calc import compute_stats, time_stats  # noqa: E402
 from fuel_tracker.parsing import (                # noqa: E402
     parse_addcar,
     parse_fillup_line,
@@ -98,6 +98,36 @@ def test_cost_calc():
     s3 = compute_stats([(0, 10.0, None), (200, 20.0, 1000.0), (500, 15.0, None)])
     assert s3.has_cost and s3.total_cost == 1000
     print("ok: cost calc")
+
+
+def test_time_stats():
+    # 1000 km driven over exactly 10 days, 3 fill-ups, ~50 L total fuel used.
+    fillups = [
+        (1000, 10.0, None, "2026-01-01 08:00:00"),
+        (1500, 25.0, None, "2026-01-06 08:00:00"),
+        (2000, 25.0, None, "2026-01-11 08:00:00"),
+    ]
+    s = compute_stats(fillups)
+    ts = time_stats(fillups, s)
+    assert ts is not None
+    assert ts.span_days == 10
+    assert almost(ts.km_per_day, 100.0)          # 1000 km / 10 days
+    assert almost(ts.days_between_fills, 5.0)     # 10 days / 2 gaps
+    # Avg tank = 500 km at 100 km/day -> 5 days after the last fill (Jan 11 -> Jan 16).
+    assert (ts.next_fill_date.month, ts.next_fill_date.day) == (1, 16)
+    assert ts.monthly_distance == 3000            # 100 km/day * 30
+
+    # A bulk import where every row shares one timestamp has no time signal.
+    same = [(0, 10.0, None, "2026-01-01 08:00:00"), (200, 12.0, None, "2026-01-01 08:00:00")]
+    assert time_stats(same, compute_stats(same)) is None
+
+    # Bulk import whose inserts land a few seconds apart (e.g. Turso round-trips):
+    # 2,431 km over ~10 s implies millions of km/day -> rejected, not projected as garbage.
+    drift = [(92184, 14.0, None, "2026-01-01 08:00:00"),
+             (93400, 14.0, None, "2026-01-01 08:00:05"),
+             (94615, 14.0, None, "2026-01-01 08:00:10")]
+    assert time_stats(drift, compute_stats(drift)) is None
+    print("ok: time stats")
 
 
 def test_addcar_parse():
@@ -343,6 +373,7 @@ if __name__ == "__main__":
     test_parsing_variants()
     test_cost_parsing()
     test_cost_calc()
+    test_time_stats()
     test_addcar_parse()
     test_full_flow_matches_notes()
     test_user_isolation()

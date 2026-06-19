@@ -207,13 +207,14 @@ def add_fillup(car_id: int, odometer: int, liters: float, cost: float | None = N
         return int(cur.lastrowid)
 
 
-def get_fillups(car_id: int) -> list[tuple[int, float, float | None]]:
+def get_fillups(car_id: int) -> list[tuple[int, float, float | None, str]]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT odometer, liters, cost FROM fillups WHERE car_id = ? ORDER BY odometer",
+            "SELECT odometer, liters, cost, created_at FROM fillups "
+            "WHERE car_id = ? ORDER BY odometer",
             (car_id,),
         ).fetchall()
-        return [(r["odometer"], r["liters"], r["cost"]) for r in rows]
+        return [(r["odometer"], r["liters"], r["cost"], r["created_at"]) for r in rows]
 
 
 def delete_last_fillup(car_id: int) -> tuple[int, float] | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 
 
 @dataclass
@@ -61,6 +62,80 @@ def compute_leg(odo_from: int, odo_to: int, liters: float,
         leg.cost_per_100 = round(cost / distance * 100, 2)
         leg.price_per_l = round(cost / liters, 2)
     return leg
+
+
+@dataclass
+class TimeStats:
+    span_days: int               # first to last fill-up
+    km_per_day: float
+    liters_per_month: float
+    days_between_fills: float     # average gap between fill-ups
+    next_fill_date: date          # projected from km/day + average tank distance
+    monthly_distance: float
+    monthly_fuel: float
+    monthly_cost: float | None = None   # None when no fill-up has a cost
+
+
+def _parse_dt(s: str) -> datetime | None:
+    # SQLite datetime('now') -> "YYYY-MM-DD HH:MM:SS"; fromisoformat handles it on 3.11+.
+    try:
+        return datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def time_stats(fillups: list[tuple], stats: Stats) -> TimeStats | None:
+    """Time-based cadence and a naive linear projection of the next fill-up.
+
+    `fillups` rows are (odometer, liters, cost, created_at); `stats` is the matching
+    odometer-based result. Returns None when there aren't ≥2 dated fill-ups spanning
+    real time (e.g. a bulk import where every row shares one timestamp).
+    """
+    dated = sorted(
+        ((p[0], dt) for p in fillups if len(p) > 3 and (dt := _parse_dt(p[3]))),
+        key=lambda x: x[1],
+    )
+    if len(dated) < 2:
+        return None
+    first_odo, first_dt = dated[0]
+    last_odo, last_dt = dated[-1]
+    span = last_dt - first_dt
+    span_days = span.days
+    if span.total_seconds() <= 0:
+        return None  # all logged at once — no time signal to analyse
+
+    span_d = span.total_seconds() / 86400
+    km_per_day = (last_odo - first_odo) / span_d
+    # A bulk import inserts rows seconds apart, so created_at spans seconds — not days —
+    # while the odometer jumps thousands of km, implying an absurd daily rate. No car
+    # averages this; treat it as "no real time signal" rather than project nonsense.
+    # ponytail: 2000 km/day floor; raise it only if someone genuinely road-trips that hard.
+    if km_per_day > 2000:
+        return None
+    days_between = span_d / (len(dated) - 1)
+
+    # Project the next fill: drive an average tank's distance at the recent daily rate.
+    avg_tank_km = stats.total_distance / len(stats.legs)
+    days_to_next = avg_tank_km / km_per_day if km_per_day > 0 else days_between
+    next_fill_date = (last_dt + timedelta(days=days_to_next)).date()
+
+    monthly_distance = km_per_day * 30
+    monthly_fuel = stats.overall_l_per_100 / 100 * monthly_distance
+    monthly_cost = (
+        stats.avg_cost_per_100 / 100 * monthly_distance
+        if stats.avg_cost_per_100 is not None else None
+    )
+
+    return TimeStats(
+        span_days=span_days,
+        km_per_day=round(km_per_day, 1),
+        liters_per_month=round(monthly_fuel, 1),
+        days_between_fills=round(days_between, 1),
+        next_fill_date=next_fill_date,
+        monthly_distance=round(monthly_distance),
+        monthly_fuel=round(monthly_fuel, 1),
+        monthly_cost=round(monthly_cost) if monthly_cost is not None else None,
+    )
 
 
 def compute_stats(fillups: list[tuple]) -> Stats | None:

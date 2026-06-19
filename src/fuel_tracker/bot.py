@@ -27,7 +27,7 @@ from telegram.ext import (
 )
 
 from . import config, db, keyboards
-from .calc import Stats, compute_stats
+from .calc import Stats, TimeStats, compute_stats, time_stats
 from .chart import render_chart
 from .config import require_token
 from .keyboards import (
@@ -371,8 +371,21 @@ async def setrated(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # --- stats / history / chart / undo -----------------------------------------
 
-def _stats_text(car: db.Car, stats: Stats | None) -> str:
+def _time_block(ts: TimeStats | None) -> str:
+    if not ts:
+        return ""
+    cost = f" · ~{ts.monthly_cost:g}/mo" if ts.monthly_cost is not None else ""
+    return (
+        f"\n\n⏱ <b>Over time</b> ({ts.span_days} days)\n"
+        f"{ts.km_per_day:g} km/day · fill every ~{ts.days_between_fills:g} days\n"
+        f"~{ts.monthly_distance:,} km/mo · ~{ts.monthly_fuel:g} L/mo{cost}\n"
+        f"📅 Next fill-up ~<b>{ts.next_fill_date:%b %d}</b>"
+    )
+
+
+def _stats_text(car: db.Car, stats: Stats | None, _fillups: list[tuple] | None = None) -> str:
     head = f"<b>{esc(car.label)}</b>\nRated: {esc(_fmt_rated(car))}\n"
+    _fillups = _fillups or []
     if not stats:
         return head + "\nNot enough fill-ups yet — add at least two to see km/L."
     latest = stats.latest_leg
@@ -392,6 +405,7 @@ def _stats_text(car: db.Car, stats: Stats | None) -> str:
            if stats.has_cost else "")
         + (f"\n<b>Latest tank:</b> {latest.km_per_l} km/L "
            f"({latest.l_per_100} L/100){cmp_line}" if latest else "")
+        + _time_block(time_stats(_fillups, stats))
     )
 
 
@@ -400,8 +414,9 @@ async def _reply_stats(message: Message, user_id: int) -> None:
     if not car:
         await _need_car(message)
         return
-    s = compute_stats(db.get_fillups(car.id))
-    await message.reply_text(_stats_text(car, s), parse_mode=HTML)
+    fillups = db.get_fillups(car.id)
+    s = compute_stats(fillups)
+    await message.reply_text(_stats_text(car, s, fillups), parse_mode=HTML)
 
 
 async def _reply_history(message: Message, user_id: int) -> None:
@@ -433,14 +448,16 @@ async def _reply_chart(message: Message, user_id: int) -> None:
     if not car:
         await _need_car(message)
         return
-    s = compute_stats(db.get_fillups(car.id))
+    fillups = db.get_fillups(car.id)
+    s = compute_stats(fillups)
     if not s:
         await message.reply_text(
             f"<b>{esc(car.label)}</b>: need at least two fill-ups to draw a chart.",
             parse_mode=HTML,
         )
         return
-    png = await asyncio.to_thread(render_chart, car, s)  # CPU-bound; keep loop free
+    ts = time_stats(fillups, s)
+    png = await asyncio.to_thread(render_chart, car, s, ts)  # CPU-bound; keep loop free
     rated = f" · rated {car.rated_kmpl} km/L" if car.rated_kmpl else ""
     caption = (
         f"<b>{esc(car.label)}</b> — overall {s.overall_km_per_l} km/L, "

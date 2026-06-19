@@ -12,7 +12,7 @@ import matplotlib.font_manager as fm  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.ticker import MaxNLocator  # noqa: E402
 
-from .calc import Stats  # noqa: E402
+from .calc import Stats, TimeStats  # noqa: E402
 from .db import Car  # noqa: E402
 
 # Palette
@@ -43,34 +43,45 @@ def _metric(ax, x: float, value: str, label: str, color: str) -> None:
             fontsize=9.5, color=MUTE)
 
 
-def render_chart(car: Car, stats: Stats) -> bytes:
+def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     plt.rcParams["font.family"] = fm.FontProperties().get_name()
     legs = stats.legs
     n = len(legs)
-    x = list(range(n))
+    idx = list(range(n))
+    xs = [leg.odo_to for leg in legs]   # plot against real odometer, not index
     kmpl = [leg.km_per_l for leg in legs]
     liters = [leg.liters for leg in legs]
     labels = [f"{leg.odo_to:,}" for leg in legs]
     rated = car.rated_kmpl
     avg = stats.overall_km_per_l
-    best_i = max(x, key=lambda i: kmpl[i])
-    worst_i = min(x, key=lambda i: kmpl[i])
+    best_i = max(idx, key=lambda i: kmpl[i])
+    worst_i = min(idx, key=lambda i: kmpl[i])
     has_cost = stats.has_cost
+
+    # Bars/labels are spaced by odometer now, so derive widths/strides from the data.
+    gaps = [xs[i + 1] - xs[i] for i in range(n - 1)]
+    bar_w = (min(gaps) if gaps else 1000) * 0.7
+    label_step = max(1, round(n / 8))    # thin per-point labels so they don't collide
+    tick_step = max(1, round(n / 9))
 
     fig = plt.figure(figsize=(9.2, 9.0 if has_cost else 7.6), dpi=150)
     fig.patch.set_facecolor("white")
     ratios = [0.5, 3.0, 1.0] + ([1.0] if has_cost else [])
     gs = fig.add_gridspec(len(ratios), 1, height_ratios=ratios, hspace=0.30,
-                          left=0.085, right=0.965, top=0.9, bottom=0.1)
+                          left=0.085, right=0.965, top=0.885 if ts else 0.9, bottom=0.1)
 
     # --- title + summary metric strip ------------------------------------
     fig.text(0.085, 0.965, f"{car.label}", fontsize=15, fontweight="bold", color=INK)
     sub = (f"{legs[0].odo_from:,}–{legs[-1].odo_to:,} km   ·   "
            f"{stats.total_distance:,} km   ·   {stats.total_fuel:g} L   ·   {n} tanks")
     if has_cost:
-        sub += (f"   ·   spent {stats.total_cost:g}   ·   "
-                f"{stats.avg_cost_per_100:g}/100km   ·   {stats.avg_price_per_l:g}/L")
+        sub += (f"   ·   spent {stats.total_cost:,.0f}   ·   "
+                f"{stats.avg_cost_per_100:,.0f}/100km   ·   {stats.avg_price_per_l:g}/L")
     fig.text(0.085, 0.925, sub, fontsize=9.5, color=MUTE)
+    if ts:
+        tline = (f"{ts.km_per_day:g} km/day  ·  fill every ~{ts.days_between_fills:g} d  ·  "
+                 f"~{ts.monthly_distance:,} km/mo  ·  next fill ~{ts.next_fill_date:%b %d}")
+        fig.text(0.085, 0.902, tline, fontsize=9, color=AMBER)
 
     ax_m = fig.add_subplot(gs[0])
     ax_m.axis("off")
@@ -82,14 +93,18 @@ def render_chart(car: Car, stats: Stats) -> bytes:
     # --- main km/L panel --------------------------------------------------
     ax1 = fig.add_subplot(gs[1])
 
-    # Rated-vs-actual band: shade the gap between actual and the rated line.
+    # Rated-vs-actual band. Only worth shading when the rated line actually crosses
+    # the data — otherwise (rated far above every tank) it's a solid wash, so just
+    # draw the reference line.
     if rated:
         ax1.axhline(rated, color=GREEN, linestyle=(0, (5, 4)), linewidth=1.3,
                     label=f"Rated {rated:g}", zorder=2)
-        ax1.fill_between(x, kmpl, rated, where=[v < rated for v in kmpl],
-                         color=RED, alpha=0.07, interpolate=True, zorder=1)
-        ax1.fill_between(x, kmpl, rated, where=[v >= rated for v in kmpl],
-                         color=GREEN, alpha=0.12, interpolate=True, zorder=1)
+        above = sum(v >= rated for v in kmpl)
+        if 0 < above < n:
+            ax1.fill_between(xs, kmpl, rated, where=[v < rated for v in kmpl],
+                             color=RED, alpha=0.07, interpolate=True, zorder=1)
+            ax1.fill_between(xs, kmpl, rated, where=[v >= rated for v in kmpl],
+                             color=GREEN, alpha=0.12, interpolate=True, zorder=1)
 
     ax1.axhline(avg, color=GREY, linestyle=(0, (6, 4)), linewidth=1.2,
                 label=f"Average {avg:g}", zorder=2)
@@ -97,28 +112,28 @@ def render_chart(car: Car, stats: Stats) -> bytes:
     # Per-tank line + rolling-average trend.
     window = max(2, round(n / 5))
     trend = _moving_average(kmpl, window)
-    ax1.plot(x, kmpl, color=BLUE, linewidth=1.4, alpha=0.45, zorder=3)
-    ax1.scatter(x, kmpl, s=34, color=BLUE, zorder=4, edgecolors="white",
+    ax1.plot(xs, kmpl, color=BLUE, linewidth=1.4, alpha=0.45, zorder=3)
+    ax1.scatter(xs, kmpl, s=34, color=BLUE, zorder=4, edgecolors="white",
                 linewidths=0.8, label="Per tank")
-    ax1.plot(x, trend, color=AMBER, linewidth=2.6, zorder=5,
+    ax1.plot(xs, trend, color=AMBER, linewidth=2.6, zorder=5,
              label=f"Trend ({window}-tank avg)")
 
-    # Per-point value labels (skip best/worst — they get emphasized labels).
-    for i in x:
-        if i in (best_i, worst_i):
+    # Per-point value labels — thinned so they don't collide; best/worst get their own.
+    for i in idx:
+        if i in (best_i, worst_i) or i % label_step:
             continue
-        ax1.annotate(f"{kmpl[i]:.1f}", (i, kmpl[i]), textcoords="offset points",
+        ax1.annotate(f"{kmpl[i]:.1f}", (xs[i], kmpl[i]), textcoords="offset points",
                      xytext=(0, 7), ha="center", fontsize=7, color=MUTE, zorder=6)
 
     # Best / worst markers.
-    ax1.scatter([best_i], [kmpl[best_i]], marker="*", s=240, color=GREEN,
+    ax1.scatter([xs[best_i]], [kmpl[best_i]], marker="*", s=240, color=GREEN,
                 edgecolors="white", linewidths=1, zorder=7)
-    ax1.annotate(f"best {kmpl[best_i]:.2f}", (best_i, kmpl[best_i]),
+    ax1.annotate(f"best {kmpl[best_i]:.2f}", (xs[best_i], kmpl[best_i]),
                  textcoords="offset points", xytext=(0, 13), ha="center",
                  fontsize=8.5, fontweight="bold", color=GREEN, zorder=8)
-    ax1.scatter([worst_i], [kmpl[worst_i]], marker="X", s=130, color=RED,
+    ax1.scatter([xs[worst_i]], [kmpl[worst_i]], marker="X", s=130, color=RED,
                 edgecolors="white", linewidths=1, zorder=7)
-    ax1.annotate(f"worst {kmpl[worst_i]:.2f}", (worst_i, kmpl[worst_i]),
+    ax1.annotate(f"worst {kmpl[worst_i]:.2f}", (xs[worst_i], kmpl[worst_i]),
                  textcoords="offset points", xytext=(0, -16), ha="center",
                  fontsize=8.5, fontweight="bold", color=RED, zorder=8)
 
@@ -137,7 +152,7 @@ def render_chart(car: Car, stats: Stats) -> bytes:
     ax2 = fig.add_subplot(gs[2], sharex=ax1)
     big = max(liters)
     bar_colors = [RED if v == big else TEAL for v in liters]
-    ax2.bar(x, liters, color=bar_colors, width=0.6, zorder=3)
+    ax2.bar(xs, liters, color=bar_colors, width=bar_w, zorder=3)
     ax2.set_ylabel("Liters", fontsize=10, color=INK)
     ax2.grid(axis="y", color="#ECEEF1", linewidth=1)
     ax2.set_axisbelow(True)
@@ -150,7 +165,7 @@ def render_chart(car: Car, stats: Stats) -> bytes:
         ax3 = fig.add_subplot(gs[3], sharex=ax1)
         cpk = [leg.cost_per_100 for leg in legs]            # None where unknown
         bars = [c if c is not None else 0 for c in cpk]
-        ax3.bar(x, bars, color=AMBER, width=0.6, zorder=3)
+        ax3.bar(xs, bars, color=AMBER, width=bar_w, zorder=3)
         ax3.axhline(stats.avg_cost_per_100, color=GREY, linestyle=(0, (6, 4)),
                     linewidth=1.2, zorder=4)
         ax3.set_ylabel("Cost / 100 km", fontsize=10, color=INK)
@@ -160,9 +175,12 @@ def render_chart(car: Car, stats: Stats) -> bytes:
         panels.append(ax3)
 
     # The bottom-most panel carries the odometer labels; hide them on the rest.
+    # Show every tick_step-th odometer (always include the last) to avoid crowding.
+    tick_idx = sorted(set(range(0, n, tick_step)) | {n - 1})
     bottom = panels[-1]
-    bottom.set_xticks(x)
-    bottom.set_xticklabels(labels, rotation=45, ha="right", fontsize=8, color=MUTE)
+    bottom.set_xticks([xs[i] for i in tick_idx])
+    bottom.set_xticklabels([labels[i] for i in tick_idx], rotation=45, ha="right",
+                           fontsize=8, color=MUTE)
     bottom.set_xlabel("Odometer (km)", fontsize=10, color=MUTE)
     for ax in panels[:-1]:
         plt.setp(ax.get_xticklabels(), visible=False)
