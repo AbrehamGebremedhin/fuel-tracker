@@ -91,14 +91,20 @@ def time_stats(fillups: list[tuple], stats: Stats) -> TimeStats | None:
     odometer-based result. Returns None when there aren't ≥2 dated fill-ups spanning
     real time (e.g. a bulk import where every row shares one timestamp).
     """
-    dated = sorted(
-        ((p[0], dt) for p in fillups if len(p) > 3 and (dt := _parse_dt(p[3]))),
-        key=lambda x: x[1],
-    )
+    # A bulk import enters many fill-ups at one instant, so they share a created_at.
+    # Those rows carry no real time signal — the distance they cover was driven before
+    # the import, not in the seconds it took to insert them. Collapse each identical
+    # timestamp to one point (the odometer as of that instant) so an import counts as a
+    # single reading instead of inflating the daily rate. ponytail: dedupe by timestamp.
+    by_dt: dict[datetime, float] = {}
+    for p in fillups:
+        if len(p) > 3 and (dt := _parse_dt(p[3])):
+            by_dt[dt] = max(by_dt.get(dt, p[0]), p[0])
+    dated = sorted(by_dt.items(), key=lambda x: x[0])
     if len(dated) < 2:
         return None
-    first_odo, first_dt = dated[0]
-    last_odo, last_dt = dated[-1]
+    first_dt, first_odo = dated[0]
+    last_dt, last_odo = dated[-1]
     span = last_dt - first_dt
     span_days = span.days
     if span.total_seconds() <= 0:

@@ -127,6 +127,19 @@ def test_time_stats():
              (93400, 14.0, None, "2026-01-01 08:00:05"),
              (94615, 14.0, None, "2026-01-01 08:00:10")]
     assert time_stats(drift, compute_stats(drift)) is None
+
+    # Bulk import (shared timestamp) followed by real fills: the import collapses to one
+    # point at its last odometer, so the rate comes from real driving, not phantom fills.
+    mixed = [
+        (92184, 14.0, None, "2026-06-15 21:03:42"),
+        (94615, 14.0, None, "2026-06-15 21:03:42"),  # same import instant
+        (94761, 14.0, None, "2026-06-25 21:03:42"),  # +146 km over 10 days
+        (94955, 17.27, None, "2026-06-26 21:03:42"),
+    ]
+    tm = time_stats(mixed, compute_stats(mixed))
+    assert tm is not None
+    # 94615 -> 94955 = 340 km over 11 days ~= 31 km/day, not 270.
+    assert tm.km_per_day < 50, tm.km_per_day
     print("ok: time stats")
 
 
