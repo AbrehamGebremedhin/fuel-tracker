@@ -91,16 +91,23 @@ def time_stats(fillups: list[tuple], stats: Stats) -> TimeStats | None:
     odometer-based result. Returns None when there aren't ≥2 dated fill-ups spanning
     real time (e.g. a bulk import where every row shares one timestamp).
     """
-    # A bulk import enters many fill-ups at one instant, so they share a created_at.
-    # Those rows carry no real time signal — the distance they cover was driven before
-    # the import, not in the seconds it took to insert them. Collapse each identical
-    # timestamp to one point (the odometer as of that instant) so an import counts as a
-    # single reading instead of inflating the daily rate. ponytail: dedupe by timestamp.
-    by_dt: dict[datetime, float] = {}
-    for p in fillups:
-        if len(p) > 3 and (dt := _parse_dt(p[3])):
-            by_dt[dt] = max(by_dt.get(dt, p[0]), p[0])
-    dated = sorted(by_dt.items(), key=lambda x: x[0])
+    # Fills entered within a short window are one data-entry batch, not separate driving
+    # events. A bulk import inserts rows seconds apart (created_at is the insert time, not
+    # the fill time), so the distance they span was driven before the import, not in those
+    # seconds. Cluster by entry gap and keep one point per batch — the odometer reached as
+    # of that batch — so the daily rate reflects real elapsed days, not insert latency.
+    # ponytail: 1h batch window; widen only if real fills are ever logged minutes apart.
+    points = sorted(
+        ((dt, p[0]) for p in fillups if len(p) > 3 and (dt := _parse_dt(p[3]))),
+        key=lambda x: x[0],
+    )
+    batch = timedelta(hours=1)
+    dated: list[tuple[datetime, float]] = []
+    for dt, odo in points:
+        if dated and dt - dated[-1][0] <= batch:
+            dated[-1] = (dt, max(dated[-1][1], odo))  # extend the current batch
+        else:
+            dated.append((dt, odo))
     if len(dated) < 2:
         return None
     first_dt, first_odo = dated[0]
