@@ -9,9 +9,13 @@ import os
 import tempfile
 from pathlib import Path
 
-# Point the DB at a throwaway file BEFORE importing the package.
+# Point the DB at a throwaway file BEFORE importing the package, and force the local
+# SQLite path even if the developer's .env has Turso creds (load_dotenv won't override an
+# env var that's already set, so the empty strings here win and keep the tests offline).
 _tmp = Path(tempfile.mkdtemp()) / "test.db"
 os.environ["FUEL_TRACKER_DB"] = str(_tmp)
+os.environ["TURSO_DATABASE_URL"] = ""
+os.environ["TURSO_AUTH_TOKEN"] = ""
 
 from fuel_tracker import db                      # noqa: E402
 from fuel_tracker.calc import compute_stats, time_stats  # noqa: E402
