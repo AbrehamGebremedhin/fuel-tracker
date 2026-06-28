@@ -83,6 +83,41 @@ def test_cost_parsing():
     print("ok: cost parsing")
 
 
+def test_parse_rejects_and_batches():
+    # Zero / negative quantities are not fill-ups.
+    assert parse_fillup_line("0 @ 92184") is None
+    assert parse_fillup_line("14.01 @ 0") is None
+    assert parse_fillup_line("") is None
+    # Comma thousands vs comma decimal in the cost amount.
+    assert parse_fillup_line("14.01 @ 92184 = 1,200").cost == 1200    # comma thousands
+    assert parse_fillup_line("14.01 @ 92184 = 12,50").cost == 12.5    # comma decimal
+    # A zero/garbage cost segment is dropped, the fill-up still parses.
+    assert parse_fillup_line("14.01 @ 92184 = 0").cost is None
+    assert parse_fillup_line("14.01 @ 92184 = free").cost is None
+    # parse_fillups splits good lines from bad ones, preserving the bad text.
+    parsed, bad = parse_fillups("14 @ 1000\nnot a fill\n\n15 @ 1200")
+    assert [p.odometer for p in parsed] == [1000, 1200]
+    assert bad == ["not a fill"]
+    print("ok: parse rejects + batches")
+
+
+def test_compute_stats_guards():
+    # Fewer than two points -> nothing to measure.
+    assert compute_stats([]) is None
+    assert compute_stats([(1000, 10.0)]) is None
+    # Two points at the same odometer -> no valid leg -> None.
+    assert compute_stats([(1000, 10.0), (1000, 12.0)]) is None
+    # A duplicate odometer makes a zero-distance leg that's dropped; the real leg survives.
+    s = compute_stats([(1000, 10.0), (1000, 5.0), (1300, 30.0)])
+    assert s is not None and len(s.legs) == 1
+    assert s.legs[0].distance == 300   # 1000 -> 1300, the zero-distance leg dropped
+    # Order of the input rows does not matter.
+    a = compute_stats([(1000, 10.0), (1300, 30.0)])
+    b = compute_stats([(1300, 30.0), (1000, 10.0)])
+    assert a.total_distance == b.total_distance == 300
+    print("ok: compute_stats guards")
+
+
 def test_cost_calc():
     # First fill-up is the baseline (no leg); the next two carry cost.
     fillups = [(1000, 10.0, None), (1200, 20.0, 1000.0), (1500, 15.0, 750.0)]
@@ -145,6 +180,19 @@ def test_time_stats():
     assert tm is not None
     # 94615 -> 94955 = 340 km over ~10 days ~= 34 km/day, not 270.
     assert tm.km_per_day < 50, tm.km_per_day
+
+    # No cost -> monthly_cost stays None.
+    assert time_stats(fillups, s).monthly_cost is None
+    # With cost on every leg, monthly_cost projects from avg cost/100 km.
+    priced = [
+        (1000, 10.0, None, "2026-01-01 08:00:00"),
+        (1500, 25.0, 2500.0, "2026-01-06 08:00:00"),   # 500 km, cost 2500
+        (2000, 25.0, 2500.0, "2026-01-11 08:00:00"),
+    ]
+    sp = compute_stats(priced)
+    tp = time_stats(priced, sp)
+    # 5000 paid over 1000 km = 500/100km; 100 km/day * 30 = 3000 km/month -> 15000.
+    assert tp.monthly_cost == 15000, tp.monthly_cost
     print("ok: time stats")
 
 
@@ -390,6 +438,8 @@ def test_delete_car():
 if __name__ == "__main__":
     test_parsing_variants()
     test_cost_parsing()
+    test_parse_rejects_and_batches()
+    test_compute_stats_guards()
     test_cost_calc()
     test_time_stats()
     test_addcar_parse()
