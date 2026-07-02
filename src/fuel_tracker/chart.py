@@ -15,16 +15,18 @@ from matplotlib.ticker import MaxNLocator  # noqa: E402
 from .calc import Stats, TimeStats  # noqa: E402
 from .db import Car  # noqa: E402
 
-# Palette
-BLUE = "#378ADD"    # per-tank series
-AMBER = "#E8833A"   # rolling-average trend
-GREEN = "#2BA84A"   # rated / best
-RED = "#E24B4A"     # worst / large fill
-TEAL = "#7FD6BB"    # liters bars
-GREY = "#9AA0A6"    # average / muted lines
-INK = "#1A1A1A"
-MUTE = "#8A9099"
-PANEL = "#F6F7F9"
+# Palette — colorblind-validated (dataviz skill, scripts/validate_palette.js), semantic roles.
+BLUE = "#2A78D6"       # per-tank actual series
+VIOLET = "#4A3AA7"     # rolling-average trend line
+GOOD = "#0CA30C"       # rated line / best marker / at-or-above-rated fill (status: good)
+CRITICAL = "#D03B3B"   # worst marker / below-rated fill (status: bad)
+AQUA = "#1BAF7A"       # liters bars
+ORANGE = "#EB6834"     # cost bars + largest-fill emphasis (accent, not a status color)
+INK = "#0B0B0B"        # headline text
+SECONDARY = "#52514E"  # time-projection line
+MUTE = "#898781"       # subtitle / axis ticks / average line / muted labels
+GRID = "#E1E0D9"       # hairline gridlines
+SURFACE = "#FCFCFB"    # chart background
 
 
 def _moving_average(values: list[float], window: int) -> list[float]:
@@ -65,7 +67,7 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     tick_step = max(1, round(n / 9))
 
     fig = plt.figure(figsize=(9.2, 9.0 if has_cost else 7.6), dpi=150)
-    fig.patch.set_facecolor("white")
+    fig.patch.set_facecolor(SURFACE)
     ratios = [0.5, 3.0, 1.0] + ([1.0] if has_cost else [])
     gs = fig.add_gridspec(len(ratios), 1, height_ratios=ratios, hspace=0.30,
                           left=0.085, right=0.965, top=0.885 if ts else 0.9, bottom=0.1)
@@ -81,13 +83,13 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     if ts:
         tline = (f"{ts.km_per_day:g} km/day  ·  fill every ~{ts.days_between_fills:g} d  ·  "
                  f"~{ts.monthly_distance:,} km/mo  ·  next fill ~{ts.next_fill_date:%b %d}")
-        fig.text(0.085, 0.902, tline, fontsize=9, color=AMBER)
+        fig.text(0.085, 0.902, tline, fontsize=9, color=SECONDARY)
 
     ax_m = fig.add_subplot(gs[0])
     ax_m.axis("off")
     _metric(ax_m, 0.125, f"{avg:g}", "Overall km/L", INK)
-    _metric(ax_m, 0.375, f"{stats.best_km_per_l:g}", "Best", GREEN)
-    _metric(ax_m, 0.625, f"{stats.worst_km_per_l:g}", "Worst", RED)
+    _metric(ax_m, 0.375, f"{stats.best_km_per_l:g}", "Best", GOOD)
+    _metric(ax_m, 0.625, f"{stats.worst_km_per_l:g}", "Worst", CRITICAL)
     _metric(ax_m, 0.875, f"{kmpl[-1]:g}", "Latest", BLUE)
 
     # --- main km/L panel --------------------------------------------------
@@ -97,16 +99,16 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     # the data — otherwise (rated far above every tank) it's a solid wash, so just
     # draw the reference line.
     if rated:
-        ax1.axhline(rated, color=GREEN, linestyle=(0, (5, 4)), linewidth=1.3,
+        ax1.axhline(rated, color=GOOD, linestyle=(0, (5, 4)), linewidth=1.3,
                     label=f"Rated {rated:g}", zorder=2)
         above = sum(v >= rated for v in kmpl)
         if 0 < above < n:
             ax1.fill_between(xs, kmpl, rated, where=[v < rated for v in kmpl],
-                             color=RED, alpha=0.07, interpolate=True, zorder=1)
+                             color=CRITICAL, alpha=0.10, interpolate=True, zorder=1)
             ax1.fill_between(xs, kmpl, rated, where=[v >= rated for v in kmpl],
-                             color=GREEN, alpha=0.12, interpolate=True, zorder=1)
+                             color=GOOD, alpha=0.10, interpolate=True, zorder=1)
 
-    ax1.axhline(avg, color=GREY, linestyle=(0, (6, 4)), linewidth=1.2,
+    ax1.axhline(avg, color=MUTE, linestyle=(0, (6, 4)), linewidth=1.2,
                 label=f"Average {avg:g}", zorder=2)
 
     # Per-tank line + rolling-average trend.
@@ -115,7 +117,7 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     ax1.plot(xs, kmpl, color=BLUE, linewidth=1.4, alpha=0.45, zorder=3)
     ax1.scatter(xs, kmpl, s=34, color=BLUE, zorder=4, edgecolors="white",
                 linewidths=0.8, label="Per tank")
-    ax1.plot(xs, trend, color=AMBER, linewidth=2.6, zorder=5,
+    ax1.plot(xs, trend, color=VIOLET, linewidth=2.6, zorder=5,
              label=f"Trend ({window}-tank avg)")
 
     # Per-point value labels — thinned so they don't collide; best/worst get their own.
@@ -126,23 +128,23 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
                      xytext=(0, 7), ha="center", fontsize=7, color=MUTE, zorder=6)
 
     # Best / worst markers.
-    ax1.scatter([xs[best_i]], [kmpl[best_i]], marker="*", s=240, color=GREEN,
+    ax1.scatter([xs[best_i]], [kmpl[best_i]], marker="*", s=240, color=GOOD,
                 edgecolors="white", linewidths=1, zorder=7)
     ax1.annotate(f"best {kmpl[best_i]:.2f}", (xs[best_i], kmpl[best_i]),
                  textcoords="offset points", xytext=(0, 13), ha="center",
-                 fontsize=8.5, fontweight="bold", color=GREEN, zorder=8)
-    ax1.scatter([xs[worst_i]], [kmpl[worst_i]], marker="X", s=130, color=RED,
+                 fontsize=8.5, fontweight="bold", color=GOOD, zorder=8)
+    ax1.scatter([xs[worst_i]], [kmpl[worst_i]], marker="X", s=130, color=CRITICAL,
                 edgecolors="white", linewidths=1, zorder=7)
     ax1.annotate(f"worst {kmpl[worst_i]:.2f}", (xs[worst_i], kmpl[worst_i]),
                  textcoords="offset points", xytext=(0, -16), ha="center",
-                 fontsize=8.5, fontweight="bold", color=RED, zorder=8)
+                 fontsize=8.5, fontweight="bold", color=CRITICAL, zorder=8)
 
     lo = min(min(kmpl), rated or kmpl[0])
     hi = max(max(kmpl), rated or 0)
     pad = (hi - lo) * 0.22 or 1
     ax1.set_ylim(lo - pad * 0.6, hi + pad)
     ax1.set_ylabel("km / L", fontsize=11, color=INK)
-    ax1.grid(axis="y", color="#ECEEF1", linewidth=1)
+    ax1.grid(axis="y", color=GRID, linewidth=1)
     ax1.set_axisbelow(True)
     ax1.margins(x=0.02)
     ax1.legend(loc="upper center", ncol=4, fontsize=8.5, frameon=False,
@@ -151,10 +153,10 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     # --- liters panel -----------------------------------------------------
     ax2 = fig.add_subplot(gs[2], sharex=ax1)
     big = max(liters)
-    bar_colors = [RED if v == big else TEAL for v in liters]
+    bar_colors = [ORANGE if v == big else AQUA for v in liters]
     ax2.bar(xs, liters, color=bar_colors, width=bar_w, zorder=3)
     ax2.set_ylabel("Liters", fontsize=10, color=INK)
-    ax2.grid(axis="y", color="#ECEEF1", linewidth=1)
+    ax2.grid(axis="y", color=GRID, linewidth=1)
     ax2.set_axisbelow(True)
     ax2.yaxis.set_major_locator(MaxNLocator(nbins=4))
 
@@ -165,11 +167,11 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
         ax3 = fig.add_subplot(gs[3], sharex=ax1)
         cpk = [leg.cost_per_100 for leg in legs]            # None where unknown
         bars = [c if c is not None else 0 for c in cpk]
-        ax3.bar(xs, bars, color=AMBER, width=bar_w, zorder=3)
-        ax3.axhline(stats.avg_cost_per_100, color=GREY, linestyle=(0, (6, 4)),
+        ax3.bar(xs, bars, color=ORANGE, width=bar_w, zorder=3)
+        ax3.axhline(stats.avg_cost_per_100, color=MUTE, linestyle=(0, (6, 4)),
                     linewidth=1.2, zorder=4)
         ax3.set_ylabel("Cost / 100 km", fontsize=10, color=INK)
-        ax3.grid(axis="y", color="#ECEEF1", linewidth=1)
+        ax3.grid(axis="y", color=GRID, linewidth=1)
         ax3.set_axisbelow(True)
         ax3.yaxis.set_major_locator(MaxNLocator(nbins=4))
         panels.append(ax3)
@@ -191,7 +193,7 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
         ax.tick_params(colors=MUTE, length=0)
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor="white", bbox_inches="tight")
+    fig.savefig(buf, format="png", facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
