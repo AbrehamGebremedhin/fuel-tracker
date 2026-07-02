@@ -27,7 +27,7 @@ from telegram.ext import (
 )
 
 from . import config, db, keyboards
-from .calc import Stats, TimeStats, compute_stats, time_stats
+from .calc import Stats, TimeStats, compute_stats, time_stats, trend_insights
 from .chart import render_chart
 from .config import require_token
 from .keyboards import (
@@ -375,12 +375,20 @@ def _time_block(ts: TimeStats | None) -> str:
     if not ts:
         return ""
     cost = f" · ~{ts.monthly_cost:g}/mo" if ts.monthly_cost is not None else ""
+    next_cost = f" (~{ts.next_fill_cost:g})" if ts.next_fill_cost is not None else ""
     return (
         f"\n\n⏱ <b>Over time</b> ({ts.span_days} days)\n"
         f"{ts.km_per_day:g} km/day · fill every ~{ts.days_between_fills:g} days\n"
         f"~{ts.monthly_distance:,} km/mo · ~{ts.monthly_fuel:g} L/mo{cost}\n"
-        f"📅 Next fill-up ~<b>{ts.next_fill_date:%b %d}</b>"
+        f"📅 Next fill-up ~<b>{ts.next_fill_date:%b %d}</b>{next_cost}"
     )
+
+
+def _insights_block(stats: Stats, rated_kmpl: float | None) -> str:
+    lines = trend_insights(stats, rated_kmpl)
+    if not lines:
+        return ""
+    return "\n\n🔍 <b>Trend</b>\n" + "\n".join(esc(line) for line in lines)
 
 
 def _stats_text(car: db.Car, stats: Stats | None, _fillups: list[tuple] | None = None) -> str:
@@ -406,6 +414,7 @@ def _stats_text(car: db.Car, stats: Stats | None, _fillups: list[tuple] | None =
         + (f"\n<b>Latest tank:</b> {latest.km_per_l} km/L "
            f"({latest.l_per_100} L/100){cmp_line}" if latest else "")
         + _time_block(time_stats(_fillups, stats))
+        + _insights_block(stats, car.rated_kmpl)
     )
 
 

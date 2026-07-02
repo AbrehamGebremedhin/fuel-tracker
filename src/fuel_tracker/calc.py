@@ -74,6 +74,7 @@ class TimeStats:
     monthly_distance: float
     monthly_fuel: float
     monthly_cost: float | None = None   # None when no fill-up has a cost
+    next_fill_cost: float | None = None  # avg tank size * avg price/L; None with no cost data
 
 
 def _parse_dt(s: str) -> datetime | None:
@@ -138,6 +139,10 @@ def time_stats(fillups: list[tuple], stats: Stats) -> TimeStats | None:
         stats.avg_cost_per_100 / 100 * monthly_distance
         if stats.avg_cost_per_100 is not None else None
     )
+    next_fill_cost = (
+        avg_tank_km / 100 * stats.avg_cost_per_100
+        if stats.avg_cost_per_100 is not None else None
+    )
 
     return TimeStats(
         span_days=span_days,
@@ -148,6 +153,7 @@ def time_stats(fillups: list[tuple], stats: Stats) -> TimeStats | None:
         monthly_distance=round(monthly_distance),
         monthly_fuel=round(monthly_fuel, 1),
         monthly_cost=round(monthly_cost) if monthly_cost is not None else None,
+        next_fill_cost=round(next_fill_cost) if next_fill_cost is not None else None,
     )
 
 
@@ -196,3 +202,46 @@ def compute_stats(fillups: list[tuple]) -> Stats | None:
         avg_cost_per_100=avg_cost_per_100,
         avg_price_per_l=avg_price_per_l,
     )
+
+
+def trend_insights(stats: Stats, rated_kmpl: float | None = None) -> list[str]:
+    """Short notes on recent direction: economy, gap-vs-rated, fuel price.
+
+    Compares the average of the most recent legs against the window before them.
+    Needs at least 4 legs for two meaningful windows; a move under 5% is noise, not a trend.
+    """
+    legs = stats.legs
+    if len(legs) < 4:
+        return []
+    window = min(3, len(legs) // 2)
+    recent, prior = legs[-window:], legs[-2 * window:-window]
+    avg = lambda xs: sum(xs) / len(xs)  # noqa: E731
+
+    out = []
+    recent_kmpl, prior_kmpl = avg([l.km_per_l for l in recent]), avg([l.km_per_l for l in prior])
+    delta_pct = (recent_kmpl - prior_kmpl) / prior_kmpl * 100
+    if abs(delta_pct) >= 5:
+        arrow = "📈 Improving" if delta_pct > 0 else "📉 Declining"
+        out.append(
+            f"{arrow}: last {window} tanks avg {recent_kmpl:.2f} km/L vs "
+            f"{prior_kmpl:.2f} before ({delta_pct:+.0f}%)"
+        )
+
+    if rated_kmpl:
+        recent_gap, prior_gap = recent_kmpl - rated_kmpl, prior_kmpl - rated_kmpl
+        if recent_gap < 0 and recent_gap < prior_gap - 0.3:
+            out.append(
+                f"⚠️ Falling further below rated economy ({abs(recent_gap):.2f} km/L under, "
+                f"was {abs(prior_gap):.2f})"
+            )
+
+    recent_p = [l.price_per_l for l in recent if l.price_per_l is not None]
+    prior_p = [l.price_per_l for l in prior if l.price_per_l is not None]
+    if recent_p and prior_p:
+        rp, pp = avg(recent_p), avg(prior_p)
+        price_delta_pct = (rp - pp) / pp * 100
+        if abs(price_delta_pct) >= 5:
+            arrow = "⛽ Fuel price rising" if price_delta_pct > 0 else "⛽ Fuel price falling"
+            out.append(f"{arrow}: {rp:.2f}/L recently vs {pp:.2f}/L before ({price_delta_pct:+.0f}%)")
+
+    return out

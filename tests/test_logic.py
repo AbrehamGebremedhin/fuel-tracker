@@ -18,7 +18,7 @@ os.environ["TURSO_DATABASE_URL"] = ""
 os.environ["TURSO_AUTH_TOKEN"] = ""
 
 from fuel_tracker import db                      # noqa: E402
-from fuel_tracker.calc import compute_stats, time_stats  # noqa: E402
+from fuel_tracker.calc import compute_stats, time_stats, trend_insights  # noqa: E402
 from fuel_tracker.parsing import (                # noqa: E402
     parse_addcar,
     parse_fillup_line,
@@ -193,7 +193,41 @@ def test_time_stats():
     tp = time_stats(priced, sp)
     # 5000 paid over 1000 km = 500/100km; 100 km/day * 30 = 3000 km/month -> 15000.
     assert tp.monthly_cost == 15000, tp.monthly_cost
+    # next_fill_cost = avg tank distance (500 km) / 100 * avg cost/100km (500) = 2500.
+    assert tp.next_fill_cost == 2500, tp.next_fill_cost
+    assert time_stats(fillups, s).next_fill_cost is None  # no cost data -> no estimate
     print("ok: time stats")
+
+
+def test_trend_insights():
+    # Fewer than 4 legs -> no trend signal at all.
+    short = compute_stats([(0, 10.0), (100, 10.0), (200, 10.0)])
+    assert trend_insights(short) == []
+
+    # Economy declining >5%: first 3 tanks at 20 km/L (100km/5L), last 3 at ~14.9 km/L.
+    declining = compute_stats([
+        (0, 5.0), (100, 5.0), (200, 5.0), (300, 5.0),
+        (370, 5.0), (440, 5.0), (510, 5.0),
+    ])
+    lines = trend_insights(declining)
+    assert any("Declining" in line for line in lines), lines
+
+    # Stable economy (every leg identical) -> no economy-trend line.
+    stable = compute_stats([(i * 100, 10.0) for i in range(6)])
+    assert trend_insights(stable) == []
+
+    # Gap-vs-rated widening: economy declining while already below a rated figure.
+    lines2 = trend_insights(declining, rated_kmpl=25.0)
+    assert any("below rated" in line for line in lines2), lines2
+
+    # Fuel price rising >5% between the two windows.
+    priced = compute_stats([
+        (0, 10.0, None), (100, 10.0, 1000.0), (200, 10.0, 1000.0), (300, 10.0, 1000.0),
+        (400, 10.0, 1300.0), (500, 10.0, 1300.0), (600, 10.0, 1300.0),
+    ])
+    lines3 = trend_insights(priced)
+    assert any("price rising" in line for line in lines3), lines3
+    print("ok: trend insights")
 
 
 def test_addcar_parse():
@@ -442,6 +476,7 @@ if __name__ == "__main__":
     test_compute_stats_guards()
     test_cost_calc()
     test_time_stats()
+    test_trend_insights()
     test_addcar_parse()
     test_full_flow_matches_notes()
     test_user_isolation()
