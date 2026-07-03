@@ -49,6 +49,9 @@ from .keyboards import (
     BTN_ADD,
     BTN_CARS,
     BTN_CHART,
+    BTN_COMPARE,
+    BTN_EXPORT,
+    BTN_FILLUPS,
     BTN_HELP,
     BTN_STATS,
     MAIN_KEYBOARD,
@@ -70,9 +73,26 @@ HELP_BODY = (
     "   (also <code>14.01 liter @ 92184 km</code>). Paste many lines to import.\n"
     "   Add cost: <code>14.01 @ 92184 = 1200</code> (total) or <code>@ 85/L</code> (per litre).\n"
     "   Didn't fill to the top? Add <code>partial</code>: <code>8 @ 92184 partial</code>.\n"
-    "3. Tap the buttons below or use the menu for stats &amp; charts.\n"
-    "4. More in the menu: /fillups (edit/delete a specific entry), /export, "
-    "/compare, /goal, /units."
+    "3. Tap the buttons below, or use any command:\n\n"
+    "<b>Cars</b>\n"
+    "<code>/addcar &lt;make&gt; &lt;model&gt; &lt;year&gt;</code> — add a car\n"
+    "<code>/cars</code> — list your cars\n"
+    "<code>/use &lt;car id&gt;</code> — switch active car\n"
+    "<code>/editcar &lt;car id&gt; &lt;make&gt; &lt;model&gt; &lt;year&gt;</code> — fix a typo, "
+    "keeps its history\n"
+    "<code>/delcar &lt;car id&gt;</code> — delete a car and its history\n"
+    "<code>/setrated &lt;km/L&gt;</code> — set rated economy manually\n"
+    "<code>/goal &lt;km/L&gt;</code> — set a target economy (send with no number to clear)\n"
+    "<code>/units metric|imperial</code> — km/L vs mpg display in /stats\n\n"
+    "<b>Fill-ups</b>\n"
+    "<code>/stats</code> — economy stats for the active car\n"
+    "<code>/compare</code> — compare all your cars\n"
+    "<code>/history</code> — last 12 legs with a sparkline\n"
+    "<code>/chart</code> — km/L trend chart image\n"
+    "<code>/fillups</code> — list fill-ups with their ids\n"
+    "<code>/delfill &lt;id&gt;</code> — delete a specific fill-up (fix a typo: delete + re-log it)\n"
+    "<code>/export</code> — download fill-ups as a CSV file\n"
+    "<code>/undo</code> — remove the last fill-up"
 )
 
 
@@ -798,6 +818,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return await _reply_chart(update.message, user_id)
     if text == BTN_CARS:
         return await _reply_cars(update.message, user_id)
+    if text == BTN_COMPARE:
+        return await compare(update, ctx)
+    if text == BTN_FILLUPS:
+        return await fillups_cmd(update, ctx)
+    if text == BTN_EXPORT:
+        return await export_cmd(update, ctx)
     if text == BTN_HELP:
         return await start(update, ctx)
     if text == BTN_ADD:

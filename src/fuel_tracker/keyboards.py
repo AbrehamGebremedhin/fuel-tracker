@@ -19,13 +19,17 @@ BTN_ADD = "➕ Add fuel"
 BTN_STATS = "📊 Stats"
 BTN_CHART = "📈 Chart"
 BTN_CARS = "🚗 Cars"
+BTN_COMPARE = "🆚 Compare"
+BTN_FILLUPS = "📋 Fill-ups"
+BTN_EXPORT = "📄 Export"
 BTN_HELP = "❓ Help"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton(BTN_ADD), KeyboardButton(BTN_STATS)],
         [KeyboardButton(BTN_CHART), KeyboardButton(BTN_CARS)],
-        [KeyboardButton(BTN_HELP)],
+        [KeyboardButton(BTN_COMPARE), KeyboardButton(BTN_FILLUPS)],
+        [KeyboardButton(BTN_EXPORT), KeyboardButton(BTN_HELP)],
     ],
     resize_keyboard=True,
     is_persistent=True,
