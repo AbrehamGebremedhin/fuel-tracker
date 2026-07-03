@@ -10,6 +10,7 @@ matplotlib.use("Agg")  # headless backend; must be set before pyplot import
 
 import matplotlib.font_manager as fm  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 from matplotlib.ticker import MaxNLocator  # noqa: E402
 
 from .calc import Stats, TimeStats  # noqa: E402
@@ -27,6 +28,27 @@ SECONDARY = "#52514E"  # time-projection line
 MUTE = "#898781"       # subtitle / axis ticks / average line / muted labels
 GRID = "#E1E0D9"       # hairline gridlines
 SURFACE = "#FCFCFB"    # chart background
+
+
+def _smooth_curve(xs: list[float], ys: list[float], samples: int = 12) -> tuple[list[float], list[float]]:
+    """Catmull-Rom interpolation through every point, for a curved (non-straight) line."""
+    if len(xs) < 3:
+        return xs, ys
+    pts = [(xs[0], ys[0])] + list(zip(xs, ys)) + [(xs[-1], ys[-1])]
+    out_x: list[float] = []
+    out_y: list[float] = []
+    for i in range(1, len(pts) - 2):
+        p0, p1, p2, p3 = pts[i - 1], pts[i], pts[i + 1], pts[i + 2]
+        for t in np.linspace(0, 1, samples, endpoint=False):
+            t2, t3 = t * t, t * t * t
+            for axis in (0, 1):
+                a, b, c, d = p0[axis], p1[axis], p2[axis], p3[axis]
+                v = 0.5 * (2 * b + (-a + c) * t + (2*a - 5*b + 4*c - d) * t2
+                           + (-a + 3*b - 3*c + d) * t3)
+                (out_x if axis == 0 else out_y).append(v)
+    out_x.append(pts[-2][0])
+    out_y.append(pts[-2][1])
+    return out_x, out_y
 
 
 def _moving_average(values: list[float], window: int) -> list[float]:
@@ -63,12 +85,11 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     # Bars/labels are spaced by odometer now, so derive widths/strides from the data.
     gaps = [xs[i + 1] - xs[i] for i in range(n - 1)]
     bar_w = (min(gaps) if gaps else 1000) * 0.7
-    label_step = max(1, round(n / 8))    # thin per-point labels so they don't collide
     tick_step = max(1, round(n / 9))
 
-    fig = plt.figure(figsize=(9.2, 9.0 if has_cost else 7.6), dpi=150)
+    fig = plt.figure(figsize=(9.2, 7.6), dpi=150)
     fig.patch.set_facecolor(SURFACE)
-    ratios = [0.5, 3.0, 1.0] + ([1.0] if has_cost else [])
+    ratios = [0.5, 3.0, 1.6]
     gs = fig.add_gridspec(len(ratios), 1, height_ratios=ratios, hspace=0.30,
                           left=0.085, right=0.965, top=0.885 if ts else 0.9, bottom=0.1)
 
@@ -111,23 +132,17 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     ax1.axhline(avg, color=MUTE, linestyle=(0, (6, 4)), linewidth=1.2,
                 label=f"Average {avg:g}", zorder=2)
 
-    # Per-tank line + rolling-average trend.
+    # Per-tank line (smoothed through the real points) + rolling-average trend.
     window = max(2, round(n / 5))
     trend = _moving_average(kmpl, window)
-    ax1.plot(xs, kmpl, color=BLUE, linewidth=1.4, alpha=0.45, zorder=3)
+    sm_x, sm_y = _smooth_curve(xs, kmpl)
+    ax1.plot(sm_x, sm_y, color=BLUE, linewidth=1.4, alpha=0.45, zorder=3)
     ax1.scatter(xs, kmpl, s=34, color=BLUE, zorder=4, edgecolors="white",
                 linewidths=0.8, label="Per tank")
     ax1.plot(xs, trend, color=VIOLET, linewidth=2.6, zorder=5,
              label=f"Trend ({window}-tank avg)")
 
-    # Per-point value labels — thinned so they don't collide; best/worst get their own.
-    for i in idx:
-        if i in (best_i, worst_i) or i % label_step:
-            continue
-        ax1.annotate(f"{kmpl[i]:.1f}", (xs[i], kmpl[i]), textcoords="offset points",
-                     xytext=(0, 7), ha="center", fontsize=7, color=MUTE, zorder=6)
-
-    # Best / worst markers.
+    # Best / worst / latest markers — the only per-point labels, to avoid clutter.
     ax1.scatter([xs[best_i]], [kmpl[best_i]], marker="*", s=240, color=GOOD,
                 edgecolors="white", linewidths=1, zorder=7)
     ax1.annotate(f"best {kmpl[best_i]:.2f}", (xs[best_i], kmpl[best_i]),
@@ -138,6 +153,10 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     ax1.annotate(f"worst {kmpl[worst_i]:.2f}", (xs[worst_i], kmpl[worst_i]),
                  textcoords="offset points", xytext=(0, -16), ha="center",
                  fontsize=8.5, fontweight="bold", color=CRITICAL, zorder=8)
+    if n - 1 not in (best_i, worst_i):
+        ax1.annotate(f"latest {kmpl[-1]:.2f}", (xs[-1], kmpl[-1]),
+                     textcoords="offset points", xytext=(0, 13), ha="center",
+                     fontsize=8.5, fontweight="bold", color=BLUE, zorder=8)
 
     lo = min(min(kmpl), rated or kmpl[0])
     hi = max(max(kmpl), rated or 0)
@@ -161,20 +180,6 @@ def render_chart(car: Car, stats: Stats, ts: TimeStats | None = None) -> bytes:
     ax2.yaxis.set_major_locator(MaxNLocator(nbins=4))
 
     panels = [ax1, ax2]
-
-    # --- cost panel (only when fill-ups have a recorded cost) -------------
-    if has_cost:
-        ax3 = fig.add_subplot(gs[3], sharex=ax1)
-        cpk = [leg.cost_per_100 for leg in legs]            # None where unknown
-        bars = [c if c is not None else 0 for c in cpk]
-        ax3.bar(xs, bars, color=ORANGE, width=bar_w, zorder=3)
-        ax3.axhline(stats.avg_cost_per_100, color=MUTE, linestyle=(0, (6, 4)),
-                    linewidth=1.2, zorder=4)
-        ax3.set_ylabel("Cost / 100 km", fontsize=10, color=INK)
-        ax3.grid(axis="y", color=GRID, linewidth=1)
-        ax3.set_axisbelow(True)
-        ax3.yaxis.set_major_locator(MaxNLocator(nbins=4))
-        panels.append(ax3)
 
     # The bottom-most panel carries the odometer labels; hide them on the rest.
     # Show every tick_step-th odometer (always include the last) to avoid crowding.
