@@ -118,6 +118,62 @@ def test_compute_stats_guards():
     print("ok: compute_stats guards")
 
 
+def test_compute_stats_partial_fills():
+    # Baseline full tank, a partial top-up, then a full fill that closes the interval.
+    # The partial's liters must roll into the next full leg, not stand alone as a leg
+    # of its own (which is what made large fill-ups swing the overall figure).
+    fillups = [
+        (0, 20.0, None, None, True),     # baseline (never produces a leg)
+        (100, 3.0, None, None, False),   # topped up a little, tank still not full
+        (250, 17.0, None, None, True),   # filled to the top: closes 0 -> 250
+    ]
+    s = compute_stats(fillups)
+    assert s is not None
+    assert len(s.legs) == 1
+    leg = s.legs[0]
+    assert leg.odo_from == 0 and leg.odo_to == 250
+    assert leg.distance == 250
+    assert almost(leg.liters, 20.0)          # 3 (partial) + 17 (full), not just 17
+    assert almost(leg.km_per_l, 12.5)        # 250 / 20
+    assert s.total_distance == 250
+    assert almost(s.total_fuel, 20.0)
+
+    # A trailing partial with no following full fill doesn't close a leg — it's an
+    # open tank, not yet measurable.
+    trailing = fillups + [(300, 4.0, None, None, False)]
+    s2 = compute_stats(trailing)
+    assert len(s2.legs) == 1
+    assert s2.total_distance == 250   # doesn't creep forward to the open partial at 300
+
+    # Fill-ups with no is_full field at all (old-shape tuples) default to full, so
+    # existing data/tests are unaffected.
+    assert compute_stats([(0, 10.0), (100, 10.0)]).legs[0].liters == 10.0
+    print("ok: compute_stats partial fills")
+
+
+def test_partial_marker_parsing():
+    p = parse_fillup_line("14.01 @ 92184")
+    assert p.is_full is True
+    p2 = parse_fillup_line("8 @ 92184 partial")
+    assert p2.is_full is False and p2.liters == 8 and p2.odometer == 92184
+    p3 = parse_fillup_line("8 @ 92184 partial = 500")
+    assert p3.is_full is False and p3.cost == 500
+    p4 = parse_fillup_line("8 @ 92184 PARTIAL")
+    assert p4.is_full is False
+    print("ok: partial marker parsing")
+
+
+def test_is_full_roundtrip():
+    db.init_db()
+    car_id = db.add_car(404, "Nissan", "Note", 2015)
+    db.add_fillup(car_id, 100, 5.0)                  # default: full
+    db.add_fillup(car_id, 150, 2.0, is_full=False)   # partial
+    rows = db.get_fillups(car_id)
+    assert rows[0][4] is True
+    assert rows[1][4] is False
+    print("ok: is_full roundtrip")
+
+
 def test_cost_calc():
     # First fill-up is the baseline (no leg); the next two carry cost.
     fillups = [(1000, 10.0, None), (1200, 20.0, 1000.0), (1500, 15.0, 750.0)]
@@ -474,6 +530,9 @@ if __name__ == "__main__":
     test_cost_parsing()
     test_parse_rejects_and_batches()
     test_compute_stats_guards()
+    test_compute_stats_partial_fills()
+    test_partial_marker_parsing()
+    test_is_full_roundtrip()
     test_cost_calc()
     test_time_stats()
     test_trend_insights()

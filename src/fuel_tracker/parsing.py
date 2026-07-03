@@ -25,6 +25,7 @@ _FILLUP_RE = re.compile(
 
 _PER_LITRE_RE = re.compile(r"/\s*l|per\s*l", re.IGNORECASE)
 _AMOUNT_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_PARTIAL_RE = re.compile(r"\bpartial\b", re.IGNORECASE)
 
 
 @dataclass
@@ -32,6 +33,7 @@ class ParsedFillup:
     liters: float
     odometer: int
     cost: float | None = None  # total cost for this fill-up, in the user's own currency
+    is_full: bool = True  # False when the "partial" keyword is present
 
 
 def _to_float(s: str) -> float:
@@ -79,8 +81,10 @@ def parse_fillup_line(line: str) -> ParsedFillup | None:
         return None
     if liters <= 0 or odo <= 0:
         return None
-    cost = _parse_cost(m.group("rest"), liters)
-    return ParsedFillup(liters=liters, odometer=odo, cost=cost)
+    rest = m.group("rest")
+    is_full = not _PARTIAL_RE.search(rest)
+    cost = _parse_cost(_PARTIAL_RE.sub("", rest), liters)
+    return ParsedFillup(liters=liters, odometer=odo, cost=cost, is_full=is_full)
 
 
 def parse_fillups(text: str) -> tuple[list[ParsedFillup], list[str]]:

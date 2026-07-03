@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS fillups (
     odometer   INTEGER NOT NULL,
     liters     REAL    NOT NULL,
     cost       REAL,
-    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    is_full    INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS user_state (
@@ -72,10 +73,15 @@ def _connect(path: Path | None = None):
 def init_db(path: Path | None = None) -> None:
     with _connect(path) as conn:
         conn.executescript(_SCHEMA)
-        # Migrate older databases that predate the cost column.
+        # Migrate older databases that predate the cost / is_full columns.
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(fillups)")}
         if "cost" not in cols:
             conn.execute("ALTER TABLE fillups ADD COLUMN cost REAL")
+        if "is_full" not in cols:
+            conn.execute("ALTER TABLE fillups ADD COLUMN is_full INTEGER NOT NULL DEFAULT 1")
+            # Every fill-up logged before this column existed was assumed full tank
+            # (the fill-to-full method had no other option) — backfill explicitly.
+            conn.execute("UPDATE fillups SET is_full = 1 WHERE is_full IS NULL")
 
 
 def _row_to_car(row: sqlite3.Row) -> Car:
@@ -198,23 +204,27 @@ def get_active_car(user_id: int) -> Car | None:
 
 # --- fillups ----------------------------------------------------------------
 
-def add_fillup(car_id: int, odometer: int, liters: float, cost: float | None = None) -> int:
+def add_fillup(car_id: int, odometer: int, liters: float, cost: float | None = None,
+               is_full: bool = True) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO fillups (car_id, odometer, liters, cost) VALUES (?, ?, ?, ?)",
-            (car_id, odometer, liters, cost),
+            "INSERT INTO fillups (car_id, odometer, liters, cost, is_full) VALUES (?, ?, ?, ?, ?)",
+            (car_id, odometer, liters, cost, int(is_full)),
         )
         return int(cur.lastrowid)
 
 
-def get_fillups(car_id: int) -> list[tuple[int, float, float | None, str]]:
+def get_fillups(car_id: int) -> list[tuple[int, float, float | None, str, bool]]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT odometer, liters, cost, created_at FROM fillups "
+            "SELECT odometer, liters, cost, created_at, is_full FROM fillups "
             "WHERE car_id = ? ORDER BY odometer",
             (car_id,),
         ).fetchall()
-        return [(r["odometer"], r["liters"], r["cost"], r["created_at"]) for r in rows]
+        return [
+            (r["odometer"], r["liters"], r["cost"], r["created_at"], bool(r["is_full"]))
+            for r in rows
+        ]
 
 
 def delete_last_fillup(car_id: int) -> tuple[int, float] | None:

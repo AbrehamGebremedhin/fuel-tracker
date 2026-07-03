@@ -54,6 +54,7 @@ HELP_BODY = (
     "2. Log a fill-up by sending <code>14.01 @ 92184</code>\n"
     "   (also <code>14.01 liter @ 92184 km</code>). Paste many lines to import.\n"
     "   Add cost: <code>14.01 @ 92184 = 1200</code> (total) or <code>@ 85/L</code> (per litre).\n"
+    "   Didn't fill to the top? Add <code>partial</code>: <code>8 @ 92184 partial</code>.\n"
     "3. Tap the buttons below or use the menu for stats &amp; charts."
 )
 
@@ -554,7 +555,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return await start(update, ctx)
     if text == BTN_ADD:
         await update.message.reply_text(
-            "Send your fill-up as <code>liters @ km</code>, e.g. <code>14.01 @ 92184</code>.",
+            "Send your fill-up as <code>liters @ km</code>, e.g. <code>14.01 @ 92184</code>.\n"
+            "Didn't fill to the top? Add <code>partial</code>, e.g. "
+            "<code>8 @ 92184 partial</code>.",
             parse_mode=HTML,
             reply_markup=ForceReply(input_field_placeholder="14.01 @ 92184"),
         )
@@ -579,11 +582,17 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     for p in parsed:
-        db.add_fillup(car.id, p.odometer, p.liters, p.cost)
+        db.add_fillup(car.id, p.odometer, p.liters, p.cost, p.is_full)
 
     s = compute_stats(db.get_fillups(car.id))
     count_note = f"✅ Logged {len(parsed)} fill-up(s) for <b>{esc(car.label)}</b>."
-    if len(parsed) == 1 and s and s.latest_leg:
+    just_added = parsed[0]
+    # A partial fill doesn't close a leg, so s.latest_leg (if any) is stale — it belongs
+    # to an earlier full-to-full stretch, not the fill-up just logged.
+    if len(parsed) == 1 and not just_added.is_full:
+        body = (f"{count_note}\n⛽ Marked as a partial fill — economy for this tank will "
+                f"show once you log a full fill-up.")
+    elif len(parsed) == 1 and s and s.latest_leg and s.latest_leg.odo_to == just_added.odometer:
         leg = s.latest_leg
         rated_cmp = ""
         if car.rated_kmpl:

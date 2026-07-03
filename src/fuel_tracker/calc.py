@@ -158,7 +158,13 @@ def time_stats(fillups: list[tuple], stats: Stats) -> TimeStats | None:
 
 
 def compute_stats(fillups: list[tuple]) -> Stats | None:
-    """`fillups` is a list of (odometer, liters[, cost]); order doesn't matter.
+    """`fillups` is a list of (odometer, liters[, cost[, created_at[, is_full]]]);
+    order doesn't matter. `is_full` defaults to True (every fill-up is assumed full
+    unless marked otherwise, matching the pre-partial-tracking data).
+
+    Fill-to-full only works between two full tanks: a partial fill-up doesn't close
+    a leg on its own, its liters just carry forward and get folded into the next leg
+    once a full fill-up is reached.
 
     Returns None if there aren't enough points to measure a leg.
     """
@@ -167,16 +173,37 @@ def compute_stats(fillups: list[tuple]) -> Stats | None:
         return None
 
     legs: list[Leg] = []
-    for prev, cur in zip(pts, pts[1:]):
-        cost = cur[2] if len(cur) > 2 else None
-        leg = compute_leg(prev[0], cur[0], cur[1], cost)
+    anchor_odo = pts[0][0]
+    pending_liters = 0.0
+    pending_cost = 0.0
+    has_cost = False
+    for p in pts[1:]:
+        odo, liters = p[0], p[1]
+        cost = p[2] if len(p) > 2 else None
+        is_full = p[4] if len(p) > 4 else True
+
+        pending_liters += liters
+        if cost is not None and cost > 0:
+            pending_cost += cost
+            has_cost = True
+
+        if not is_full:
+            continue  # partial fill: keep accumulating, don't close the leg yet
+
+        leg = compute_leg(anchor_odo, odo, pending_liters, pending_cost if has_cost else None)
         if leg:
             legs.append(leg)
+        anchor_odo = odo
+        pending_liters = 0.0
+        pending_cost = 0.0
+        has_cost = False
 
     if not legs:
         return None
 
-    total_distance = pts[-1][0] - pts[0][0]
+    # Span only the closed (full-to-full) legs — a trailing, still-open partial fill
+    # hasn't consumed its fuel yet, so it can't be counted into distance or fuel used.
+    total_distance = legs[-1].odo_to - pts[0][0]
     total_fuel = sum(leg.liters for leg in legs)
     kmpls = [leg.km_per_l for leg in legs]
 
