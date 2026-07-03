@@ -231,6 +231,37 @@ def compute_stats(fillups: list[tuple]) -> Stats | None:
     )
 
 
+def should_remind(next_fill_date: date, last_reminder: str | None, today: date) -> bool:
+    """True once the projected fill-up date has arrived and we haven't nudged today."""
+    if today < next_fill_date:
+        return False
+    return last_reminder != today.isoformat()
+
+
+# --- imperial display helpers (storage/calc stays metric; only formatting converts) ---
+
+MI_PER_KM = 1 / 1.609344
+GAL_PER_L = 1 / 3.785411784  # US gallon
+
+
+def fmt_economy(km_per_l: float, units: str) -> str:
+    if units == "imperial":
+        return f"{km_per_l * MI_PER_KM / GAL_PER_L:.2f} mpg"
+    return f"{km_per_l} km/L"
+
+
+def fmt_distance(km: float, units: str) -> str:
+    if units == "imperial":
+        return f"{km * MI_PER_KM:,.0f} mi"
+    return f"{km:,.0f} km"
+
+
+def fmt_volume(liters: float, units: str) -> str:
+    if units == "imperial":
+        return f"{liters * GAL_PER_L:.2f} gal"
+    return f"{liters:.2f} L"
+
+
 def trend_insights(stats: Stats, rated_kmpl: float | None = None) -> list[str]:
     """Short notes on recent direction: economy, gap-vs-rated, fuel price.
 

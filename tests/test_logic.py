@@ -18,7 +18,15 @@ os.environ["TURSO_DATABASE_URL"] = ""
 os.environ["TURSO_AUTH_TOKEN"] = ""
 
 from fuel_tracker import db                      # noqa: E402
-from fuel_tracker.calc import compute_stats, time_stats, trend_insights  # noqa: E402
+from fuel_tracker.calc import (                   # noqa: E402
+    compute_stats,
+    fmt_distance,
+    fmt_economy,
+    fmt_volume,
+    should_remind,
+    time_stats,
+    trend_insights,
+)
 from fuel_tracker.parsing import (                # noqa: E402
     parse_addcar,
     parse_fillup_line,
@@ -525,6 +533,72 @@ def test_delete_car():
     print("ok: delete car (cascade + ownership)")
 
 
+def test_should_remind():
+    from datetime import date
+    due = date(2026, 7, 10)
+    assert should_remind(due, None, date(2026, 7, 10)) is True
+    assert should_remind(due, None, date(2026, 7, 9)) is False           # not due yet
+    assert should_remind(due, "2026-07-10", date(2026, 7, 10)) is False  # already nudged today
+    assert should_remind(due, "2026-07-09", date(2026, 7, 10)) is True   # overdue, new day
+    print("ok: should_remind")
+
+
+def test_unit_conversions():
+    assert fmt_economy(10, "metric") == "10 km/L"
+    assert fmt_economy(10, "imperial") == "23.52 mpg"
+    assert fmt_distance(100, "metric") == "100 km"
+    assert fmt_distance(100, "imperial") == "62 mi"
+    assert fmt_volume(10, "metric") == "10.00 L"
+    assert fmt_volume(10, "imperial") == "2.64 gal"
+    print("ok: unit conversion helpers")
+
+
+def test_editcar_goal_units_reminder_state():
+    db.init_db()
+    car_id = db.add_car(404, "Nissan", "Note", 2015)
+    db.set_active(404, car_id)
+    db.add_fillup(car_id, 100, 5.0)
+
+    assert db.update_car_info(car_id, user_id=999, make="X", model="Y", year=2000) is False
+    assert db.update_car_info(
+        car_id, user_id=404, make="Nissan", model="Note e-POWER", year=2016
+    ) is True
+    car = db.get_car(car_id)
+    assert car.model == "Note e-POWER" and car.year == 2016
+    assert len(db.get_fillups(car_id)) == 1  # history untouched by the rename
+
+    assert db.set_goal(car_id, user_id=999, goal_kmpl=20.0) is False
+    assert db.set_goal(car_id, user_id=404, goal_kmpl=20.0) is True
+    assert db.get_car(car_id).goal_kmpl == 20.0
+    db.set_goal(car_id, user_id=404, goal_kmpl=None)
+    assert db.get_car(car_id).goal_kmpl is None
+
+    assert db.get_units(404) == "metric"
+    db.set_units(404, "imperial")
+    assert db.get_units(404) == "imperial"
+    assert db.get_last_reminder(404) is None
+    db.set_last_reminder(404, "2026-07-03")
+    assert db.get_last_reminder(404) == "2026-07-03"
+    print("ok: editcar / goal / units / reminder state")
+
+
+def test_delfill_and_listing():
+    db.init_db()
+    car_id = db.add_car(505, "Kia", "Rio", 2019)
+    id1 = db.add_fillup(car_id, 1000, 10.0)
+    id2 = db.add_fillup(car_id, 1200, 12.0, cost=1500)
+
+    rows = db.list_fillups_with_id(car_id)
+    assert [r[0] for r in rows] == [id2, id1]  # newest first
+
+    other_car = db.add_car(505, "Kia", "Soul", 2019)
+    assert db.delete_fillup(id1, other_car) is None  # wrong car scope
+
+    assert db.delete_fillup(id1, car_id) == (1000, 10.0)
+    assert [r[0] for r in db.list_fillups_with_id(car_id)] == [id2]
+    print("ok: delete fill-up by id + listing order")
+
+
 if __name__ == "__main__":
     test_parsing_variants()
     test_cost_parsing()
@@ -548,4 +622,8 @@ if __name__ == "__main__":
     test_group_variants()
     test_turso_codec()
     test_delete_car()
+    test_should_remind()
+    test_unit_conversions()
+    test_editcar_goal_units_reminder_state()
+    test_delfill_and_listing()
     print("\nAll logic tests passed.")

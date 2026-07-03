@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS cars (
     rated_kmpl  REAL,
     source_url  TEXT,
     rated_note  TEXT,
+    goal_kmpl   REAL,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -35,8 +36,10 @@ CREATE TABLE IF NOT EXISTS fillups (
 );
 
 CREATE TABLE IF NOT EXISTS user_state (
-    user_id        INTEGER PRIMARY KEY,
-    active_car_id  INTEGER REFERENCES cars(id) ON DELETE SET NULL
+    user_id             INTEGER PRIMARY KEY,
+    active_car_id       INTEGER REFERENCES cars(id) ON DELETE SET NULL,
+    units               TEXT    NOT NULL DEFAULT 'metric',
+    last_reminder_sent  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_fillups_car ON fillups(car_id, odometer);
@@ -55,6 +58,7 @@ class Car:
     rated_kmpl: float | None
     source_url: str | None
     rated_note: str | None
+    goal_kmpl: float | None = None
 
     @property
     def label(self) -> str:
@@ -83,6 +87,16 @@ def init_db(path: Path | None = None) -> None:
             # (the fill-to-full method had no other option) — backfill explicitly.
             conn.execute("UPDATE fillups SET is_full = 1 WHERE is_full IS NULL")
 
+        car_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cars)")}
+        if "goal_kmpl" not in car_cols:
+            conn.execute("ALTER TABLE cars ADD COLUMN goal_kmpl REAL")
+
+        state_cols = {r["name"] for r in conn.execute("PRAGMA table_info(user_state)")}
+        if "units" not in state_cols:
+            conn.execute("ALTER TABLE user_state ADD COLUMN units TEXT NOT NULL DEFAULT 'metric'")
+        if "last_reminder_sent" not in state_cols:
+            conn.execute("ALTER TABLE user_state ADD COLUMN last_reminder_sent TEXT")
+
 
 def _row_to_car(row: sqlite3.Row) -> Car:
     return Car(
@@ -95,6 +109,7 @@ def _row_to_car(row: sqlite3.Row) -> Car:
         rated_kmpl=row["rated_kmpl"],
         source_url=row["source_url"],
         rated_note=row["rated_note"],
+        goal_kmpl=row["goal_kmpl"],
     )
 
 
@@ -180,6 +195,32 @@ def set_rated(car_id: int, *, l100: float | None, kmpl: float | None,
         )
 
 
+def _owns_car(conn, car_id: int, user_id: int) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM cars WHERE id = ? AND user_id = ?", (car_id, user_id)
+    ).fetchone() is not None
+
+
+def update_car_info(car_id: int, user_id: int, make: str, model: str, year: int) -> bool:
+    """Fix a car's make/model/year in place (keeps its fill-up history and rated data)."""
+    with _connect() as conn:
+        if not _owns_car(conn, car_id, user_id):
+            return False
+        conn.execute(
+            "UPDATE cars SET make = ?, model = ?, year = ? WHERE id = ?",
+            (make, model, year, car_id),
+        )
+        return True
+
+
+def set_goal(car_id: int, user_id: int, goal_kmpl: float | None) -> bool:
+    with _connect() as conn:
+        if not _owns_car(conn, car_id, user_id):
+            return False
+        conn.execute("UPDATE cars SET goal_kmpl = ? WHERE id = ?", (goal_kmpl, car_id))
+        return True
+
+
 # --- active car -------------------------------------------------------------
 
 def set_active(user_id: int, car_id: int) -> None:
@@ -238,3 +279,70 @@ def delete_last_fillup(car_id: int) -> tuple[int, float] | None:
             return None
         conn.execute("DELETE FROM fillups WHERE id = ?", (row["id"],))
         return (row["odometer"], row["liters"])
+
+
+def list_fillups_with_id(car_id: int, limit: int | None = 20) -> list[tuple]:
+    """Recent raw fill-up rows as (id, odometer, liters, cost, created_at, is_full),
+    newest first — for showing a user which id to /delfill. ``limit=None`` for all rows
+    (used by /export)."""
+    with _connect() as conn:
+        sql = "SELECT id, odometer, liters, cost, created_at, is_full FROM fillups WHERE car_id = ? ORDER BY id DESC"
+        params: tuple = (car_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (car_id, limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [
+            (r["id"], r["odometer"], r["liters"], r["cost"], r["created_at"], bool(r["is_full"]))
+            for r in rows
+        ]
+
+
+def delete_fillup(fillup_id: int, car_id: int) -> tuple[int, float] | None:
+    """Delete one fill-up by id, scoped to a car the caller already owns. Returns
+    (odometer, liters), or None if it doesn't exist / belongs to another car."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT odometer, liters FROM fillups WHERE id = ? AND car_id = ?",
+            (fillup_id, car_id),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute("DELETE FROM fillups WHERE id = ?", (fillup_id,))
+        return (row["odometer"], row["liters"])
+
+
+# --- per-user preferences -----------------------------------------------------
+
+def get_units(user_id: int) -> str:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT units FROM user_state WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row["units"] if row and row["units"] else "metric"
+
+
+def set_units(user_id: int, units: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO user_state (user_id, units) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET units = excluded.units""",
+            (user_id, units),
+        )
+
+
+def get_last_reminder(user_id: int) -> str | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT last_reminder_sent FROM user_state WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row["last_reminder_sent"] if row else None
+
+
+def set_last_reminder(user_id: int, day: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO user_state (user_id, last_reminder_sent) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET last_reminder_sent = excluded.last_reminder_sent""",
+            (user_id, day),
+        )

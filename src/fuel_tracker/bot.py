@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import os
+from datetime import date
 from html import escape as _escape
 
 from telegram import (
@@ -12,6 +15,7 @@ from telegram import (
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     Message,
     MenuButtonCommands,
     Update,
@@ -23,11 +27,22 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from . import config, db, keyboards
-from .calc import Stats, TimeStats, compute_stats, time_stats, trend_insights
+from .calc import (
+    Stats,
+    TimeStats,
+    compute_stats,
+    fmt_distance,
+    fmt_economy,
+    fmt_volume,
+    should_remind,
+    time_stats,
+    trend_insights,
+)
 from .chart import render_chart
 from .config import require_token
 from .keyboards import (
@@ -55,7 +70,9 @@ HELP_BODY = (
     "   (also <code>14.01 liter @ 92184 km</code>). Paste many lines to import.\n"
     "   Add cost: <code>14.01 @ 92184 = 1200</code> (total) or <code>@ 85/L</code> (per litre).\n"
     "   Didn't fill to the top? Add <code>partial</code>: <code>8 @ 92184 partial</code>.\n"
-    "3. Tap the buttons below or use the menu for stats &amp; charts."
+    "3. Tap the buttons below or use the menu for stats &amp; charts.\n"
+    "4. More in the menu: /fillups (edit/delete a specific entry), /export, "
+    "/compare, /goal, /units."
 )
 
 
@@ -285,6 +302,26 @@ async def cars(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply_cars(update.message, update.effective_user.id)
 
 
+async def compare(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    all_cars = db.list_cars(user_id)
+    if not all_cars:
+        await _need_car(update.message)
+        return
+    lines = ["<b>Compare your cars</b>"]
+    for c in all_cars:
+        s = compute_stats(db.get_fillups(c.id))
+        if not s:
+            lines.append(f"<b>{esc(c.label)}</b> — not enough fill-ups yet")
+            continue
+        rated = f" (rated {c.rated_kmpl})" if c.rated_kmpl else ""
+        lines.append(
+            f"<b>{esc(c.label)}</b> — {s.overall_km_per_l} km/L overall{rated}, "
+            f"best {s.best_km_per_l}, worst {s.worst_km_per_l}"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
+
 async def use_car(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not ctx.args or not ctx.args[0].isdigit():
@@ -370,6 +407,84 @@ async def setrated(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# --- editcar ------------------------------------------------------------------
+
+async def editcar(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    args = ctx.args or []
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(
+            "Usage: <code>/editcar &lt;car id&gt; &lt;make&gt; &lt;model&gt; &lt;year&gt;</code> "
+            "(see /cars for ids). Fixes a typo without losing its fill-up history.",
+            parse_mode=HTML,
+        )
+        return
+    car_id = int(args[0])
+    parsed = parse_addcar(" ".join(args[1:]))
+    if not parsed:
+        await update.message.reply_text(
+            "Usage: <code>/editcar &lt;car id&gt; &lt;make&gt; &lt;model&gt; &lt;year&gt;</code>",
+            parse_mode=HTML,
+        )
+        return
+    if not db.update_car_info(car_id, user_id, parsed.make, parsed.model, parsed.year):
+        await update.message.reply_text("No car with that id.")
+        return
+    await update.message.reply_text(
+        f"Updated car #{car_id} to <b>{esc(parsed.make)} {esc(parsed.model)} "
+        f"{parsed.year}</b>.",
+        parse_mode=HTML,
+    )
+
+
+# --- goal -----------------------------------------------------------------
+
+async def goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(update.message)
+        return
+    if not ctx.args:
+        db.set_goal(car.id, user_id, None)
+        await update.message.reply_text(f"Goal cleared for <b>{esc(car.label)}</b>.", parse_mode=HTML)
+        return
+    try:
+        kmpl = float(ctx.args[0].replace(",", "."))
+        if kmpl <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Usage: <code>/goal &lt;km/L&gt;</code>, e.g. <code>/goal 16</code>. "
+            "Send <code>/goal</code> with no number to clear it.",
+            parse_mode=HTML,
+        )
+        return
+    db.set_goal(car.id, user_id, round(kmpl, 2))
+    await update.message.reply_text(
+        f"🎯 Goal for <b>{esc(car.label)}</b> set to <b>{round(kmpl, 2)} km/L</b>.",
+        parse_mode=HTML,
+    )
+
+
+# --- units ------------------------------------------------------------------
+
+async def units_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    choice = (ctx.args[0].lower() if ctx.args else "")
+    if choice not in ("metric", "imperial"):
+        current = db.get_units(user_id)
+        await update.message.reply_text(
+            f"Current units: <b>{current}</b>.\n"
+            "Usage: <code>/units metric</code> (km, L, km/L) or "
+            "<code>/units imperial</code> (mi, gal, mpg) — affects /stats display only.",
+            parse_mode=HTML,
+        )
+        return
+    db.set_units(user_id, choice)
+    await update.message.reply_text(f"Units set to <b>{choice}</b>.", parse_mode=HTML)
+
+
 # --- stats / history / chart / undo -----------------------------------------
 
 def _time_block(ts: TimeStats | None) -> str:
@@ -392,7 +507,8 @@ def _insights_block(stats: Stats, rated_kmpl: float | None) -> str:
     return "\n\n🔍 <b>Trend</b>\n" + "\n".join(esc(line) for line in lines)
 
 
-def _stats_text(car: db.Car, stats: Stats | None, _fillups: list[tuple] | None = None) -> str:
+def _stats_text(car: db.Car, stats: Stats | None, _fillups: list[tuple] | None = None,
+                 units: str = "metric") -> str:
     head = f"<b>{esc(car.label)}</b>\nRated: {esc(_fmt_rated(car))}\n"
     _fillups = _fillups or []
     if not stats:
@@ -403,17 +519,26 @@ def _stats_text(car: db.Car, stats: Stats | None, _fillups: list[tuple] | None =
         delta = latest.km_per_l - car.rated_kmpl
         word = "above" if delta >= 0 else "below"
         cmp_line = f"  ({abs(round(delta, 2))} km/L {word} rated)"
+    goal_line = ""
+    if car.goal_kmpl:
+        delta = stats.overall_km_per_l - car.goal_kmpl
+        word = "above" if delta >= 0 else "below"
+        goal_line = f"\n🎯 Goal {fmt_economy(car.goal_kmpl, units)} — {abs(round(delta, 2))} km/L {word}\n"
+    l100 = f"  ({stats.overall_l_per_100} L/100)" if units == "metric" else ""
+    latest_l100 = f" ({latest.l_per_100} L/100)" if latest and units == "metric" else ""
     return (
         head
-        + f"\n<b>Overall:</b> {stats.overall_km_per_l} km/L  ({stats.overall_l_per_100} L/100)\n"
-        + f"Distance: {stats.total_distance:,} km over {stats.fillup_count} fill-ups\n"
-        + f"Fuel used: {stats.total_fuel} L\n"
-        + f"Best: {stats.best_km_per_l} km/L   Worst: {stats.worst_km_per_l} km/L\n"
+        + f"\n<b>Overall:</b> {fmt_economy(stats.overall_km_per_l, units)}{l100}\n"
+        + f"Distance: {fmt_distance(stats.total_distance, units)} over {stats.fillup_count} fill-ups\n"
+        + f"Fuel used: {fmt_volume(stats.total_fuel, units)}\n"
+        + f"Best: {fmt_economy(stats.best_km_per_l, units)}   "
+        + f"Worst: {fmt_economy(stats.worst_km_per_l, units)}\n"
+        + goal_line
         + (f"\n💰 <b>Cost:</b> {stats.total_cost:g} total · "
            f"{stats.avg_cost_per_100:g}/100 km · {stats.avg_price_per_l:g}/L\n"
            if stats.has_cost else "")
-        + (f"\n<b>Latest tank:</b> {latest.km_per_l} km/L "
-           f"({latest.l_per_100} L/100){cmp_line}" if latest else "")
+        + (f"\n<b>Latest tank:</b> {fmt_economy(latest.km_per_l, units)}"
+           f"{latest_l100}{cmp_line}" if latest else "")
         + _time_block(time_stats(_fillups, stats))
         + _insights_block(stats, car.rated_kmpl)
     )
@@ -426,7 +551,8 @@ async def _reply_stats(message: Message, user_id: int) -> None:
         return
     fillups = db.get_fillups(car.id)
     s = compute_stats(fillups)
-    await message.reply_text(_stats_text(car, s, fillups), parse_mode=HTML)
+    units = db.get_units(user_id)
+    await message.reply_text(_stats_text(car, s, fillups, units), parse_mode=HTML)
 
 
 async def _reply_history(message: Message, user_id: int) -> None:
@@ -492,6 +618,41 @@ async def _reply_undo(message: Message, user_id: int) -> None:
     )
 
 
+# --- overdue-fillup nudge ----------------------------------------------------
+
+async def _reminder_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Piggyback on any incoming update to check for an overdue fill-up.
+
+    A time-scheduled background job wouldn't fire reliably on a free-tier host that
+    sleeps when idle, but a user interaction always wakes the process — so the check
+    rides along on every update instead. At most one DM per car per day.
+    ponytail: recomputes stats on every update; fine at hobby scale, cache if it ever shows up.
+    """
+    user = update.effective_user
+    if not user:
+        return
+    car = db.get_active_car(user.id)
+    if not car:
+        return
+    fillups = db.get_fillups(car.id)
+    s = compute_stats(fillups)
+    if not s:
+        return
+    ts = time_stats(fillups, s)
+    if not ts:
+        return
+    today = date.today()
+    if not should_remind(ts.next_fill_date, db.get_last_reminder(user.id), today):
+        return
+    db.set_last_reminder(user.id, today.isoformat())
+    await ctx.bot.send_message(
+        chat_id=user.id,
+        text=(f"⛽ Heads up — <b>{esc(car.label)}</b> looks due for a fill-up "
+              f"(projected ~{ts.next_fill_date:%b %d})."),
+        parse_mode=HTML,
+    )
+
+
 async def stats(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply_stats(update.message, update.effective_user.id)
 
@@ -506,6 +667,92 @@ async def chart(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def undo(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply_undo(update.message, update.effective_user.id)
+
+
+# --- fillups list / delete-by-id / export ------------------------------------
+
+async def fillups_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(update.message)
+        return
+    rows = db.list_fillups_with_id(car.id)
+    if not rows:
+        await update.message.reply_text(f"<b>{esc(car.label)}</b>: no fill-ups yet.", parse_mode=HTML)
+        return
+    lines = [
+        f"<b>{esc(car.label)}</b> — last {len(rows)} fill-up(s)",
+        "<code>/delfill &lt;id&gt;</code> removes one — to fix a typo, delete it and "
+        "log it again.\n",
+    ]
+    for fid, odo, liters, cost, created_at, is_full in rows:
+        tag = " (partial)" if not is_full else ""
+        cost_s = f" = {cost:g}" if cost is not None else ""
+        lines.append(f"<code>#{fid}</code>  {liters:g}L @ {odo:,} km{cost_s}{tag} — {created_at}")
+    await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
+
+async def delfill(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(update.message)
+        return
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.message.reply_text(
+            "Usage: <code>/delfill &lt;id&gt;</code> (see /fillups).", parse_mode=HTML
+        )
+        return
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🗑 Yes, delete", callback_data=f"delfill:{car.id}:{ctx.args[0]}"),
+        InlineKeyboardButton("Cancel", callback_data="delfill:cancel"),
+    ]])
+    await update.message.reply_text(
+        f"⚠️ Delete fill-up #{ctx.args[0]}? This can't be undone.", reply_markup=keyboard
+    )
+
+
+async def on_delfill(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    payload = query.data.split(":", 1)[1]
+    if payload == "cancel":
+        await query.edit_message_text("Cancelled — nothing was deleted.")
+        return
+    car_id_s, fid_s = payload.split(":")
+    car = db.get_car(int(car_id_s), user_id=user_id)
+    if not car:
+        await query.edit_message_text("That car no longer exists.")
+        return
+    removed = db.delete_fillup(int(fid_s), car.id)
+    if not removed:
+        await query.edit_message_text("That fill-up no longer exists.")
+        return
+    odo, liters = removed
+    await query.edit_message_text(f"🗑 Deleted fill-up: {liters:g} L @ {odo:,} km.")
+
+
+async def export_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(update.message)
+        return
+    rows = sorted(db.list_fillups_with_id(car.id, limit=None))
+    if not rows:
+        await update.message.reply_text(f"<b>{esc(car.label)}</b>: no fill-ups yet.", parse_mode=HTML)
+        return
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["id", "odometer_km", "liters", "cost", "is_full", "created_at"])
+    for fid, odo, liters, cost, created_at, is_full in rows:
+        writer.writerow([fid, odo, liters, cost if cost is not None else "", int(is_full), created_at])
+    filename = f"{car.label.replace(' ', '_')}_fillups.csv"
+    await update.message.reply_document(
+        document=InputFile(io.BytesIO(buf.getvalue().encode("utf-8")), filename=filename)
+    )
 
 
 # --- inline quick actions ---------------------------------------------------
@@ -627,9 +874,16 @@ _COMMANDS = [
     BotCommand("stats", "Economy stats"),
     BotCommand("chart", "km/L trend chart"),
     BotCommand("history", "Recent fill-ups"),
+    BotCommand("compare", "Compare your cars"),
     BotCommand("setrated", "Set rated km/L manually"),
+    BotCommand("editcar", "Fix a car's make/model/year"),
     BotCommand("delcar", "Delete a car"),
     BotCommand("undo", "Remove last fill-up"),
+    BotCommand("fillups", "List fill-ups with their ids"),
+    BotCommand("delfill", "Delete a specific fill-up"),
+    BotCommand("export", "Export fill-ups as CSV"),
+    BotCommand("goal", "Set a km/L target"),
+    BotCommand("units", "metric/imperial display"),
     BotCommand("help", "How to use the bot"),
 ]
 
@@ -664,15 +918,24 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(on_action, pattern=r"^act:"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CommandHandler("cars", cars))
+    app.add_handler(CommandHandler("compare", compare))
     app.add_handler(CommandHandler("use", use_car))
     app.add_handler(CommandHandler("delcar", delcar))
     app.add_handler(CallbackQueryHandler(on_delete, pattern=r"^del:"))
     app.add_handler(CommandHandler("setrated", setrated))
+    app.add_handler(CommandHandler("editcar", editcar))
+    app.add_handler(CommandHandler("goal", goal))
+    app.add_handler(CommandHandler("units", units_cmd))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("chart", chart))
     app.add_handler(CommandHandler("undo", undo))
+    app.add_handler(CommandHandler("fillups", fillups_cmd))
+    app.add_handler(CommandHandler("delfill", delfill))
+    app.add_handler(CallbackQueryHandler(on_delfill, pattern=r"^delfill:"))
+    app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(TypeHandler(Update, _reminder_check), group=-1)
     return app
 
 
