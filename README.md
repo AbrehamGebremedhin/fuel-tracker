@@ -126,6 +126,8 @@ cost/100 km, and `/chart` adds a cost panel.
 
 You can paste **multiple `liters @ km` lines at once** to bulk-import your existing notes.
 
+You can also partial fills using the "partial:" when entering the refuel entry.
+
 Cars and history are scoped to your Telegram account, so several people can share the same
 bot without seeing each other's data.
 
