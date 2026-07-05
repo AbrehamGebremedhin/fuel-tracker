@@ -94,9 +94,10 @@ Notes:
 You rarely need to type commands. After `/start` you get a **persistent button keyboard**:
 
 ```
-[ ➕ Add fuel ] [ 📊 Stats ]
-[ 📈 Chart    ] [ 🚗 Cars  ]
-[ ❓ Help                  ]
+[ ➕ Add fuel ] [ 📊 Stats    ]
+[ 📈 Chart    ] [ 🚗 Cars     ]
+[ 🆚 Compare  ] [ 📋 Fill-ups ]
+[ 📄 Export   ] [ ❓ Help     ]
 ```
 
 Tap **➕ Add fuel** and send `14.01 @ 92184`; after logging you get one-tap
@@ -115,21 +116,33 @@ cost/100 km, and `/chart` adds a cost panel.
 | `/addcar Toyota Corolla 2018` | Search variants; pick yours and it fetches the rated economy |
 | `/cars` | List your cars / switch the active one |
 | `/use <id>` | Switch active car |
+| `/editcar <id> Toyota Corolla 2019` | Fix a car's make/model/year without losing its fill-up history |
 | `/delcar <id>` | Delete a car and its history (asks to confirm) |
 | `/setrated 18.5` | Manually set rated km/L for the active car |
+| `/goal 15` | Set a km/L target for the active car (no args clears it) |
+| `/units metric` \| `/units imperial` | Switch `/stats` between km/L and mpg display |
 | `14.01 @ 92184` | Log a fill-up (also accepts `14.01 liter @ 92184 km`) |
 | `14.01 @ 92184 = 1200` | Log a fill-up **with cost** (total paid). Or `@ 85/L` for price per litre |
-| `/stats` | Averages & totals (incl. cost) for the active car |
+| `8 @ 92184 partial` | Log a partial fill-up (didn't fill to the top) |
+| `/stats` | Averages & totals (incl. cost, and goal progress) for the active car |
+| `/compare` | Compare overall km/L, best/worst leg, and rated economy across all your cars |
 | `/history` | Recent fill-ups with per-leg km/L |
 | `/chart` | Dashboard: km/L trend + rated band, liters, and a cost/100 km panel when costs are logged |
+| `/fillups` | List fill-ups with their ids (for `/delfill`) |
+| `/delfill <id>` | Delete a specific fill-up (asks to confirm) |
 | `/undo` | Delete the last fill-up |
+| `/export` | Download the active car's fill-up history as CSV |
 
 You can paste **multiple `liters @ km` lines at once** to bulk-import your existing notes.
 
-You can also partial fills using the "partial:" when entering the refuel entry.
+Didn't fill to the top? Add `partial`: `8 @ 92184 partial`. Partial fills don't close a leg,
+so km/L for that tank shows once you log a full fill-up.
 
 Cars and history are scoped to your Telegram account, so several people can share the same
 bot without seeing each other's data.
+
+If a car goes quiet for a while, the bot nudges you (at most once a day) to log a fill-up
+the next time you message it — no background scheduler, so it works even on hosts that sleep.
 
 ## How km/L is calculated
 
