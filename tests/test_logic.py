@@ -599,6 +599,24 @@ def test_delfill_and_listing():
     print("ok: delete fill-up by id + listing order")
 
 
+def test_editfill():
+    db.init_db()
+    car_id = db.add_car(606, "Mazda", "Demio", 2017)
+    fid = db.add_fillup(car_id, 1000, 10.0)
+
+    other_car = db.add_car(606, "Mazda", "3", 2017)
+    assert db.get_fillup(fid, other_car) is None  # wrong car scope
+    assert db.get_fillup(fid, car_id) == (1000, 10.0, None, True)
+    assert db.update_fillup(fid, other_car, 999, 9.0, None, True) is False  # wrong car scope
+    assert db.update_fillup(fid + 99, car_id, 999, 9.0, None, True) is False  # no such id
+
+    assert db.update_fillup(fid, car_id, 1050, 11.5, 980.0, False) is True
+    assert db.get_fillup(fid, car_id) == (1050, 11.5, 980.0, False)
+    (_, odo, liters, cost, _, is_full), = db.list_fillups_with_id(car_id)
+    assert (odo, liters, cost, is_full) == (1050, 11.5, 980.0, False)
+    print("ok: edit fill-up by id")
+
+
 if __name__ == "__main__":
     test_parsing_variants()
     test_cost_parsing()
@@ -626,4 +644,5 @@ if __name__ == "__main__":
     test_unit_conversions()
     test_editcar_goal_units_reminder_state()
     test_delfill_and_listing()
+    test_editfill()
     print("\nAll logic tests passed.")

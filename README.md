@@ -79,7 +79,7 @@ startup. The schema is created automatically on first run.
 
 Notes:
 - Free web services **sleep after ~15 min idle**; the first message after a sleep wakes it (~50 s
-  cold start) and may need a resend. Add an external uptime ping if you want it always warm.
+  cold start). Add an external uptime ping if you want it always warm.
 - Leave `TURSO_*` unset to fall back to the local SQLite file (what local/dev and Docker use).
 - **Paid alternative:** a **Background Worker** + persistent disk needs no webhook and keeps plain
   SQLite, but costs ~$7/mo. Switch `render.yaml`'s `type: web` → `type: worker` and add a `disk:`.
@@ -128,8 +128,9 @@ cost/100 km, and `/chart` adds a cost panel.
 | `/compare` | Compare overall km/L, best/worst leg, and rated economy across all your cars |
 | `/history` | Recent fill-ups with per-leg km/L |
 | `/chart` | Dashboard: km/L trend + rated band, liters, and a cost/100 km panel when costs are logged |
-| `/fillups` | List fill-ups with their ids (for `/delfill`) |
+| `/fillups` | List fill-ups with their ids (for `/delfill` and `/editfill`) |
 | `/delfill <id>` | Delete a specific fill-up (asks to confirm) |
+| `/editfill <id> <liters> @ <km>` | Fix a fill-up in place (cost and `partial` work too) |
 | `/undo` | Delete the last fill-up |
 | `/export` | Download the active car's fill-up history as CSV |
 

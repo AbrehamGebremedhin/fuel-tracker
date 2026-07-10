@@ -58,7 +58,7 @@ from .keyboards import (
     add_car_hint_keyboard,
     after_fillup_keyboard,
 )
-from .parsing import parse_addcar, parse_fillups
+from .parsing import parse_addcar, parse_fillup_line, parse_fillups
 from .sources import autodata, fueleconomy, goonet
 from .sources.base import Economy
 
@@ -90,7 +90,8 @@ HELP_BODY = (
     "<code>/history</code> — last 12 legs with a sparkline\n"
     "<code>/chart</code> — km/L trend chart image\n"
     "<code>/fillups</code> — list fill-ups with their ids\n"
-    "<code>/delfill &lt;id&gt;</code> — delete a specific fill-up (fix a typo: delete + re-log it)\n"
+    "<code>/delfill &lt;id&gt;</code> — delete a specific fill-up\n"
+    "<code>/editfill &lt;id&gt; &lt;liters&gt; @ &lt;km&gt;</code> — fix a typo in a fill-up\n"
     "<code>/export</code> — download fill-ups as a CSV file\n"
     "<code>/undo</code> — remove the last fill-up"
 )
@@ -691,6 +692,11 @@ async def undo(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # --- fillups list / delete-by-id / export ------------------------------------
 
+def _fmt_fill(odo: int, liters: float, cost: float | None, is_full: bool) -> str:
+    cost_s = f" = {cost:g}" if cost is not None else ""
+    tag = " (partial)" if not is_full else ""
+    return f"{liters:g} L @ {odo:,} km{cost_s}{tag}"
+
 async def fillups_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     car = db.get_active_car(user_id)
@@ -703,13 +709,11 @@ async def fillups_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lines = [
         f"<b>{esc(car.label)}</b> — last {len(rows)} fill-up(s)",
-        "<code>/delfill &lt;id&gt;</code> removes one — to fix a typo, delete it and "
-        "log it again.\n",
+        "<code>/delfill &lt;id&gt;</code> removes one, "
+        "<code>/editfill &lt;id&gt; &lt;liters&gt; @ &lt;km&gt;</code> fixes one.\n",
     ]
     for fid, odo, liters, cost, created_at, is_full in rows:
-        tag = " (partial)" if not is_full else ""
-        cost_s = f" = {cost:g}" if cost is not None else ""
-        lines.append(f"<code>#{fid}</code>  {liters:g}L @ {odo:,} km{cost_s}{tag} — {created_at}")
+        lines.append(f"<code>#{fid}</code>  {_fmt_fill(odo, liters, cost, is_full)} — {created_at}")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
 
 
@@ -724,12 +728,18 @@ async def delfill(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Usage: <code>/delfill &lt;id&gt;</code> (see /fillups).", parse_mode=HTML
         )
         return
+    fid = int(ctx.args[0])
+    row = db.get_fillup(fid, car.id)
+    if not row:
+        await update.message.reply_text("No fill-up with that id (see /fillups).")
+        return
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🗑 Yes, delete", callback_data=f"delfill:{car.id}:{ctx.args[0]}"),
+        InlineKeyboardButton("🗑 Yes, delete", callback_data=f"delfill:{car.id}:{fid}"),
         InlineKeyboardButton("Cancel", callback_data="delfill:cancel"),
     ]])
     await update.message.reply_text(
-        f"⚠️ Delete fill-up #{ctx.args[0]}? This can't be undone.", reply_markup=keyboard
+        f"⚠️ Delete fill-up #{fid} — {_fmt_fill(*row)}? This can't be undone.",
+        reply_markup=keyboard,
     )
 
 
@@ -752,6 +762,38 @@ async def on_delfill(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     odo, liters = removed
     await query.edit_message_text(f"🗑 Deleted fill-up: {liters:g} L @ {odo:,} km.")
+
+
+async def editfill(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    car = db.get_active_car(user_id)
+    if not car:
+        await _need_car(update.message)
+        return
+    args = ctx.args or []
+    usage = (
+        "Usage: <code>/editfill &lt;id&gt; &lt;liters&gt; @ &lt;km&gt;</code> (see /fillups for ids).\n"
+        "Example: <code>/editfill 42 14.01 @ 92184</code> — cost and "
+        "<code>partial</code> work too, same as when logging."
+    )
+    parsed = parse_fillup_line(" ".join(args[1:])) if args and args[0].isdigit() else None
+    if not parsed:
+        await update.message.reply_text(usage, parse_mode=HTML)
+        return
+    fid = int(args[0])
+    old = db.get_fillup(fid, car.id)
+    if not old:
+        await update.message.reply_text("No fill-up with that id (see /fillups).")
+        return
+    db.update_fillup(fid, car.id, parsed.odometer, parsed.liters,
+                     parsed.cost, parsed.is_full)
+    await update.message.reply_text(
+        f"✏️ Fill-up #{fid} updated:\n"
+        f"was:  {_fmt_fill(*old)}\n"
+        f"now:  {_fmt_fill(parsed.odometer, parsed.liters, parsed.cost, parsed.is_full)}",
+        parse_mode=HTML,
+        reply_markup=after_fillup_keyboard(),
+    )
 
 
 async def export_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -907,6 +949,7 @@ _COMMANDS = [
     BotCommand("undo", "Remove last fill-up"),
     BotCommand("fillups", "List fill-ups with their ids"),
     BotCommand("delfill", "Delete a specific fill-up"),
+    BotCommand("editfill", "Edit a specific fill-up"),
     BotCommand("export", "Export fill-ups as CSV"),
     BotCommand("goal", "Set a km/L target"),
     BotCommand("units", "metric/imperial display"),
@@ -958,6 +1001,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("undo", undo))
     app.add_handler(CommandHandler("fillups", fillups_cmd))
     app.add_handler(CommandHandler("delfill", delfill))
+    app.add_handler(CommandHandler("editfill", editfill))
     app.add_handler(CallbackQueryHandler(on_delfill, pattern=r"^delfill:"))
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

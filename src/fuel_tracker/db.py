@@ -298,6 +298,30 @@ def list_fillups_with_id(car_id: int, limit: int | None = 20) -> list[tuple]:
         ]
 
 
+def get_fillup(fillup_id: int, car_id: int) -> tuple[int, float, float | None, bool] | None:
+    """One fill-up's (odometer, liters, cost, is_full), scoped to the caller's car."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT odometer, liters, cost, is_full FROM fillups WHERE id = ? AND car_id = ?",
+            (fillup_id, car_id),
+        ).fetchone()
+        if not row:
+            return None
+        return (row["odometer"], row["liters"], row["cost"], bool(row["is_full"]))
+
+
+def update_fillup(fillup_id: int, car_id: int, odometer: int, liters: float,
+                  cost: float | None, is_full: bool) -> bool:
+    """Overwrite one fill-up's data by id, scoped to a car the caller already owns."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE fillups SET odometer = ?, liters = ?, cost = ?, is_full = ? "
+            "WHERE id = ? AND car_id = ?",
+            (odometer, liters, cost, int(is_full), fillup_id, car_id),
+        )
+        return cur.rowcount > 0
+
+
 def delete_fillup(fillup_id: int, car_id: int) -> tuple[int, float] | None:
     """Delete one fill-up by id, scoped to a car the caller already owns. Returns
     (odometer, liters), or None if it doesn't exist / belongs to another car."""
