@@ -6,8 +6,8 @@ module responsibilities, data model, request flow, and deployment topology.
 ## Overview
 
 A single-process Telegram bot (`python-telegram-bot`, async). No web server, no queue, no
-scheduler — every feature rides on an incoming Telegram update. Storage is SQLite locally,
-or Turso (libSQL over HTTP) when deployed to a host without a persistent disk.
+scheduler — every feature rides on an incoming Telegram update. Storage is always a local
+SQLite file.
 
 ```
 Telegram update
@@ -17,8 +17,7 @@ Telegram update
       │                     calc.py  (fill-to-full economy math)
       │                     chart.py (matplotlib PNG rendering)
       ▼
-   db.py  ──────────► sqlite3  (local)
-                  └──► turso.py ──► Turso HTTP API (cloud)
+   db.py  ──────────► sqlite3  (local file)
       ▲
       │
 sources/* (autodata, goonet, fueleconomy) — rated-economy lookups, called only from
@@ -30,10 +29,9 @@ addcar/variant-selection handlers, never from the storage or calc layers.
 | Module | Responsibility |
 |---|---|
 | [`__main__.py`](src/fuel_tracker/__main__.py) | Entry point (`uv run fuel-tracker`) — just calls `bot.run()`. |
-| [`config.py`](src/fuel_tracker/config.py) | Reads `.env` / environment: bot token, DB path, Turso creds. |
+| [`config.py`](src/fuel_tracker/config.py) | Reads `.env` / environment: bot token, DB path. |
 | [`bot.py`](src/fuel_tracker/bot.py) | All Telegram handlers, command wiring, and reply text/keyboard assembly. The largest module — everything Telegram-facing lives here. |
-| [`db.py`](src/fuel_tracker/db.py) | Storage layer: schema, migrations, and CRUD for cars / fill-ups / per-user state. Picks SQLite or Turso per call via `_connect()`. |
-| [`turso.py`](src/fuel_tracker/turso.py) | Hand-rolled libSQL HTTP (Hrana v2) client exposing a `sqlite3`-compatible `execute`/`fetchone`/`fetchall` surface, so `db.py` doesn't branch on backend. |
+| [`db.py`](src/fuel_tracker/db.py) | Storage layer: schema, migrations, and CRUD for cars / fill-ups / per-user state, backed by a local SQLite file via `_connect()`. |
 | [`calc.py`](src/fuel_tracker/calc.py) | Pure functions: fill-to-full leg/stats math, time-based projections, unit formatting, trend detection. No I/O — fully unit-testable. |
 | [`parsing.py`](src/fuel_tracker/parsing.py) | Regex parsing of free-text fill-up lines (`14.01 @ 92184 = 1200`) and the `/addcar` argument. |
 | [`chart.py`](src/fuel_tracker/chart.py) | Renders the `/chart` dashboard image (matplotlib, headless `Agg` backend) — km/L trend, rated band, liters, cost. |
@@ -42,7 +40,6 @@ addcar/variant-selection handlers, never from the storage or calc layers.
 | [`sources/autodata.py`](src/fuel_tracker/sources/autodata.py) | Scrapes auto-data.net: generation/variant search, then per-variant `l/100km` economy. |
 | [`sources/goonet.py`](src/fuel_tracker/sources/goonet.py) | Scrapes goo-net.com (JDM catalog), matches by engine displacement + transmission. |
 | [`sources/fueleconomy.py`](src/fuel_tracker/sources/fueleconomy.py) | Calls the fueleconomy.gov (US EPA) JSON API, converts MPG → km/L. |
-| [`scripts/backup_turso.py`](scripts/backup_turso.py) | One-off manual dump of the live Turso tables to `backups/*.json`, meant to be run before a schema migration. |
 | [`tests/test_logic.py`](tests/test_logic.py) | Offline tests (no token, no network) for `calc`, `parsing`, and `db` — run with `uv run python tests/test_logic.py`. |
 
 ## Data model
@@ -58,22 +55,6 @@ guards for columns added after the original schema (`cost`, `is_full`, `goal_kmp
 `last_reminder_sent`) — this is the only migration mechanism; there's no version table.
 
 All queries scope by `user_id`/`car_id` ownership at the `db.py` layer (e.g. `get_car(id, user_id=...)`), so one bot instance serves multiple Telegram users without cross-visibility.
-
-## Storage backend selection
-
-`db._connect()` picks the backend per call:
-
-```python
-if config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
-    return TursoConnection(...)   # HTTP-based, used on hosts with no disk (Render free tier)
-conn = sqlite3.connect(path or DB_PATH)  # local file, used everywhere else
-```
-
-`TursoConnection` ([`turso.py`](src/fuel_tracker/turso.py)) implements just enough of the
-`sqlite3` cursor/connection surface (`execute`, `executescript`, `fetchone`, `fetchall`,
-context-manager `with`) that `db.py` never branches on which backend is active. It talks to
-Turso's `/v2/pipeline` HTTP endpoint directly via `httpx` — no native `libsql` client
-dependency, so the Docker image needs no extra system packages.
 
 ## Request flow — logging a fill-up
 
@@ -103,15 +84,14 @@ at hobby scale but would need caching under real load.
 
 ## Deployment modes
 
-`bot.run()` picks polling vs. webhook based on environment, and `db._connect()` picks SQLite
-vs. Turso — these two choices are independent but line up in practice:
+`bot.run()` picks polling vs. webhook based on environment; storage is always the local
+SQLite file:
 
 | Environment | Transport | Storage | Trigger |
 |---|---|---|---|
 | Local dev (`uv run fuel-tracker`) | Long polling | Local SQLite file | No `PORT`/`RENDER_EXTERNAL_URL` set |
 | Docker / `docker compose` | Long polling | Local SQLite in the `fueldata` volume | Same — no port env vars set |
-| Render Web Service (free) | Webhook, binds `$PORT` | Turso (no persistent disk on free tier) | `PORT` + `RENDER_EXTERNAL_URL` set by Render |
-| Render Background Worker (paid, not default) | Long polling | Local SQLite on a persistent disk | Manual `render.yaml` edit (`type: web` → `type: worker` + `disk:`) |
+| VPS (systemd, `systemctl --user`) | Long polling | Local SQLite file | Same — no port env vars set |
 
 Only one instance may poll/serve per bot token at a time (Telegram allows a single
 consumer) — see the Dockerfile/README notes about not running local + container

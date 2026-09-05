@@ -9,13 +9,9 @@ import os
 import tempfile
 from pathlib import Path
 
-# Point the DB at a throwaway file BEFORE importing the package, and force the local
-# SQLite path even if the developer's .env has Turso creds (load_dotenv won't override an
-# env var that's already set, so the empty strings here win and keep the tests offline).
+# Point the DB at a throwaway file BEFORE importing the package.
 _tmp = Path(tempfile.mkdtemp()) / "test.db"
 os.environ["FUEL_TRACKER_DB"] = str(_tmp)
-os.environ["TURSO_DATABASE_URL"] = ""
-os.environ["TURSO_AUTH_TOKEN"] = ""
 
 from fuel_tracker import db                      # noqa: E402
 from fuel_tracker.calc import (                   # noqa: E402
@@ -224,7 +220,7 @@ def test_time_stats():
     same = [(0, 10.0, None, "2026-01-01 08:00:00"), (200, 12.0, None, "2026-01-01 08:00:00")]
     assert time_stats(same, compute_stats(same)) is None
 
-    # Bulk import whose inserts land a few seconds apart (e.g. Turso round-trips):
+    # Bulk import whose inserts land a few seconds apart (e.g. slow round-trips):
     # 2,431 km over ~10 s implies millions of km/day -> rejected, not projected as garbage.
     drift = [(92184, 14.0, None, "2026-01-01 08:00:00"),
              (93400, 14.0, None, "2026-01-01 08:00:05"),
@@ -479,40 +475,6 @@ def test_group_variants():
     print("ok: group variants (gen headers + hybrid-last)")
 
 
-def test_turso_codec():
-    from fuel_tracker import turso
-    # Argument encoding (integers go over the wire as strings in Hrana).
-    assert turso._enc_arg(None) == {"type": "null"}
-    assert turso._enc_arg(42) == {"type": "integer", "value": "42"}
-    assert turso._enc_arg(1.5) == {"type": "float", "value": 1.5}
-    assert turso._enc_arg("hi") == {"type": "text", "value": "hi"}
-    # Cell decoding.
-    assert turso._dec_cell({"type": "integer", "value": "7"}) == 7
-    assert turso._dec_cell({"type": "float", "value": "1.5"}) == 1.5
-    assert turso._dec_cell({"type": "null"}) is None
-    assert turso._dec_cell({"type": "text", "value": "x"}) == "x"
-    # Parsing a Hrana execute result into dict rows + lastrowid.
-    entry = {"response": {"result": {
-        "cols": [{"name": "id"}, {"name": "liters"}, {"name": "cost"}],
-        "rows": [[{"type": "integer", "value": "1"},
-                  {"type": "float", "value": "14.01"},
-                  {"type": "null"}]],
-        "last_insert_rowid": "1",
-    }}}
-    cur = turso.TursoConnection._to_cursor(entry)
-    row = cur.fetchone()
-    assert row == {"id": 1, "liters": 14.01, "cost": None}
-    assert cur.lastrowid == 1
-    assert turso.http_url("libsql://db-org.turso.io") == "https://db-org.turso.io"
-    assert turso.http_url("db-org.turso.io") == "https://db-org.turso.io"        # bare host
-    assert turso.http_url('"libsql://db-org.turso.io"') == "https://db-org.turso.io"  # quoted
-    assert turso.http_url("https://db-org.turso.io/") == "https://db-org.turso.io"
-    # Stray newline/whitespace from a mangled paste must not break DNS.
-    assert turso.http_url("libsql://db-org\n.turso.io\r\n") == "https://db-org.turso.io"
-    assert turso.http_url("  fuel-tracker-x.aws-us-west-2.turso.io  ") == "https://fuel-tracker-x.aws-us-west-2.turso.io"
-    print("ok: turso codec")
-
-
 def test_delete_car():
     db.init_db()
     car_id = db.add_car(303, "Mazda", "Demio", 2014)
@@ -638,7 +600,6 @@ if __name__ == "__main__":
     test_undo()
     test_short_gen_tag()
     test_group_variants()
-    test_turso_codec()
     test_delete_car()
     test_should_remind()
     test_unit_conversions()

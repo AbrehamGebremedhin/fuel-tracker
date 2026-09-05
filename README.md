@@ -51,39 +51,45 @@ docker run -d --name fuel-tracker --env-file .env -v fueldata:/data --restart un
 > **Only one instance per token.** Telegram allows a single polling consumer, so stop any local
 > `uv run fuel-tracker` before starting the container (otherwise you'll see a `Conflict` error).
 
-### Deploy to Render (free)
+### Deploy on your own VPS (systemd)
 
-The bot adapts to its host: with no `PORT`/`RENDER_EXTERNAL_URL` it long-polls (local/dev); on a
-Render **Web Service** it serves Telegram via **webhook**, binding the port Render requires. Because
-the free tier has no persistent disk, storage uses **[Turso](https://turso.tech)** (libSQL over
-HTTP) so your data survives restarts/sleeps. The repo ships a [`render.yaml`](render.yaml) Blueprint
-for this.
+With no `PORT`/`RENDER_EXTERNAL_URL` set, the bot long-polls — no ports, domain, or TLS needed,
+so a small VPS with a persistent disk is a natural fit. Storage is always the local SQLite file.
 
-**1. Create a free Turso database** and grab its URL + token:
+**1.** Clone the repo on the VPS, `uv sync --frozen --no-dev`, and set up `.env` as in Quick start
+(plus optionally `FUEL_TRACKER_DB` pointed at a stable absolute path).
+
+**2.** Run it as a user-level systemd service (no root needed) so it survives reboots and restarts
+on crash:
 
 ```bash
-turso db create fuel-tracker
-turso db show fuel-tracker --url        # -> libsql://fuel-tracker-<org>.turso.io
-turso db tokens create fuel-tracker     # -> the auth token
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/fuel-tracker.service <<'EOF'
+[Unit]
+Description=fuel-tracker telegram bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/fuel-tracker
+EnvironmentFile=/path/to/fuel-tracker/.env
+ExecStart=%h/.local/bin/uv run fuel-tracker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+loginctl enable-linger "$USER"   # let the service run even when you're logged out
+systemctl --user daemon-reload
+systemctl --user enable --now fuel-tracker
+journalctl --user -u fuel-tracker -f   # follow logs
 ```
 
-**2. Deploy:** push this repo to GitHub → Render **New → Blueprint** → pick the repo. When prompted,
-set these (all `sync: false`, so they're entered as secrets, never committed):
-
-- `TELEGRAM_BOT_TOKEN`
-- `TURSO_DATABASE_URL` — the `libsql://…` URL
-- `TURSO_AUTH_TOKEN` — the token
-
-Render builds the Dockerfile, the webhook binds the port, and the bot registers its webhook on
-startup. The schema is created automatically on first run.
-
-Notes:
-- Free web services **sleep after ~15 min idle**; the first message after a sleep wakes it (~50 s
-  cold start). Add an external uptime ping if you want it always warm.
-- Leave `TURSO_*` unset to fall back to the local SQLite file (what local/dev and Docker use).
-- **Paid alternative:** a **Background Worker** + persistent disk needs no webhook and keeps plain
-  SQLite, but costs ~$7/mo. Switch `render.yaml`'s `type: web` → `type: worker` and add a `disk:`.
-- Only run one instance per token — don't also run it locally while Render is live.
+Only run one instance per token — stop any other deployment (Render, another VPS, local
+`uv run fuel-tracker`) before starting this one, otherwise Telegram will reject the older poller
+with a `Conflict` error.
 
 > **Set in BotFather (manual, optional):** profile picture and the bot's display name —
 > these can't be set via the API. The command menu, description and "about" text are
